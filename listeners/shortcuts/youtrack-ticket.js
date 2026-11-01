@@ -1,4 +1,9 @@
+import { DEFAULT_PRIORITY, DEFAULT_TYPE, ISSUE_TYPES, PRIORITIES } from '../../integrations/youtrack.js';
+import { resolveUserName } from '../../utils/slack.js';
 import { createTokenReader } from '../../utils/tokens.js';
+
+/** @param {string} value */
+const selectOption = (value) => ({ text: { type: 'plain_text', text: value }, value });
 
 /**
  * Handle the "Create YouTrack Ticket" message shortcut.
@@ -181,15 +186,7 @@ export async function handleYouTrackShortcut({ ack, shortcut, client, logger }) 
 
     const viewId = modalRes.view?.id;
 
-    let authorName = messageUser;
-    if (messageUser) {
-      try {
-        const info = await client.users.info({ user: messageUser });
-        authorName = info.user?.real_name || info.user?.name || messageUser;
-      } catch {
-        // keep the user ID as fallback
-      }
-    }
+    const authorName = messageUser ? await resolveUserName(client, messageUser) : messageUser;
 
     const contextMessages = await gatherContext(client, channelId, messageTs, threadTs, messageUser, logger);
 
@@ -205,21 +202,9 @@ export async function handleYouTrackShortcut({ ack, shortcut, client, logger }) 
     let previewText;
 
     if (contextMessages.length > 1) {
-      const userCache = new Map();
-      userCache.set(messageUser, authorName);
-
       const lines = [];
       for (const msg of contextMessages) {
-        let name = userCache.get(msg.user);
-        if (!name) {
-          try {
-            const info = await client.users.info({ user: msg.user });
-            name = info.user?.real_name || info.user?.name || msg.user;
-          } catch {
-            name = msg.user;
-          }
-          userCache.set(msg.user, name);
-        }
+        const name = await resolveUserName(client, msg.user);
         let line = `**${name}:** ${msg.text}`;
         if (msg.files?.length) {
           const fileNames = msg.files.map((f) => f.name).join(', ');
@@ -280,15 +265,8 @@ export async function handleYouTrackShortcut({ ack, shortcut, client, logger }) 
             element: {
               type: 'static_select',
               action_id: 'type_select',
-              initial_option: {
-                text: { type: 'plain_text', text: 'Task' },
-                value: 'Task',
-              },
-              options: [
-                { text: { type: 'plain_text', text: 'Task' }, value: 'Task' },
-                { text: { type: 'plain_text', text: 'Bug' }, value: 'Bug' },
-                { text: { type: 'plain_text', text: 'Feature' }, value: 'Feature' },
-              ],
+              initial_option: selectOption(DEFAULT_TYPE),
+              options: ISSUE_TYPES.map(selectOption),
             },
             label: { type: 'plain_text', text: 'Type' },
           },
@@ -298,16 +276,8 @@ export async function handleYouTrackShortcut({ ack, shortcut, client, logger }) 
             element: {
               type: 'static_select',
               action_id: 'priority_select',
-              initial_option: {
-                text: { type: 'plain_text', text: 'Normal' },
-                value: 'Normal',
-              },
-              options: [
-                { text: { type: 'plain_text', text: 'Critical' }, value: 'Critical' },
-                { text: { type: 'plain_text', text: 'Major' }, value: 'Major' },
-                { text: { type: 'plain_text', text: 'Normal' }, value: 'Normal' },
-                { text: { type: 'plain_text', text: 'Minor' }, value: 'Minor' },
-              ],
+              initial_option: selectOption(DEFAULT_PRIORITY),
+              options: PRIORITIES.map(selectOption),
             },
             label: { type: 'plain_text', text: 'Priority' },
           },

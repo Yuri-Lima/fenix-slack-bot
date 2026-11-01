@@ -15,8 +15,9 @@ logs/
 # Node.js
 node_modules/
 
-# OAuth
+# Runtime state (see dataDir in config.js)
 data/
+tests/.data/
 
 # Deployment-specific config (see fenix.config.example.json, prompts/context.example.md)
 /fenix.config.json

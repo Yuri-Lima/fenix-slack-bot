@@ -1,16 +1,18 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { config, resolvePath } from '../config.js';
 
 // Failure log per build configuration. TeamCity only notifies Slack about
 // failed builds, so this records which tests failed and when -- it is not a
 // pass/fail history. Fail rates always come from TeamCity
-// (agent/tools/flaky-tracker.js getTestHistory).
+// (integrations/test-history.js getTestHistory).
 
-const DATA_DIR = join(import.meta.dirname, '..', 'data', 'flaky');
+const DATA_DIR = join(resolvePath(config.dataDir), 'flaky');
 const MAX_RUNS_PER_TEST = 60;
 const MAX_BUILDS = 300;
 
-if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+mkdirSync(DATA_DIR, { recursive: true });
 
 /** @typedef {{ buildId: number, status: 'FAILURE' | 'SUCCESS', ts: number, buildNumber?: string }} TestRun */
 /** @typedef {{ name: string, shortName: string, runs: TestRun[], lastSeen: number, lastFailed: number }} TestEntry */
@@ -40,10 +42,38 @@ function load(configId) {
   }
 }
 
+/** @type {Map<string, Promise<void>>} last pending write per config */
+const pendingWrites = new Map();
+
+/**
+ * Persist a config's log without blocking the event loop. Writes for the same
+ * config are chained so they land in order, and each goes to a temp file that
+ * is renamed into place, so a crash never leaves a half-written file.
+ * @param {string} configId
+ * @returns {Promise<void>}
+ */
 function save(configId) {
   const data = cache.get(configId);
-  if (!data) return;
-  writeFileSync(filePath(configId), JSON.stringify(data), 'utf-8');
+  if (!data) return Promise.resolve();
+  const target = filePath(configId);
+  const previous = pendingWrites.get(configId) || Promise.resolve();
+  const write = previous
+    .then(async () => {
+      const tmp = `${target}.tmp`;
+      await writeFile(tmp, JSON.stringify(data), 'utf-8');
+      await rename(tmp, target);
+    })
+    .catch((e) => console.error(`Failure log write failed for ${configId}: ${e}`));
+  pendingWrites.set(configId, write);
+  return write;
+}
+
+/**
+ * Resolves once every write started so far has finished (for shutdown and tests).
+ * @returns {Promise<void>}
+ */
+export async function flushFailureLog() {
+  await Promise.all(pendingWrites.values());
 }
 
 function testKey(name) {
@@ -54,12 +84,23 @@ function testKey(name) {
   return `t${(h >>> 0).toString(36)}`;
 }
 
+/**
+ * Keep the newest MAX_BUILDS builds, and drop tests that have not appeared in
+ * any of them, so renamed or deleted tests do not accumulate forever.
+ * @param {StoreData} data
+ * @returns {void}
+ */
 function pruneBuilds(data) {
   const ids = Object.keys(data.builds);
   if (ids.length <= MAX_BUILDS) return;
   const sorted = ids.sort((a, b) => data.builds[a].ts - data.builds[b].ts);
   const toRemove = sorted.slice(0, ids.length - MAX_BUILDS);
   for (const id of toRemove) delete data.builds[id];
+
+  const kept = new Set(Object.keys(data.builds));
+  for (const [key, entry] of Object.entries(data.tests)) {
+    if (!entry.runs.some((r) => kept.has(String(r.buildId)))) delete data.tests[key];
+  }
 }
 
 /**
@@ -98,7 +139,7 @@ export function recordBuildResults(configId, buildId, buildNumber, testResults, 
 
   data.builds[bidStr] = { ts, failedTests: failedKeys };
   pruneBuilds(data);
-  save(configId);
+  void save(configId);
 }
 
 /**

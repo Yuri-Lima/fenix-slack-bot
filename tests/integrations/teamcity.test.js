@@ -1,8 +1,8 @@
 import assert from 'node:assert';
 import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 
-import { getTestHistory } from '../../../agent/tools/flaky-tracker.js';
-import { locatorValue } from '../../../agent/tools/teamcity.js';
+import { locatorValue } from '../../integrations/teamcity.js';
+import { getTestHistory } from '../../integrations/test-history.js';
 
 // Real-world shape: commas and colons are locator syntax, and TeamCity
 // answered HTTP 400 when they were only URL-encoded.

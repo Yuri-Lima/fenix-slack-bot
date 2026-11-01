@@ -1,10 +1,16 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { baseUrl, config } from '../../config.js';
+import { config } from '../../config.js';
+import {
+  buildUrl,
+  changedFiles,
+  commitAuthor,
+  commitTitle,
+  locatorValue,
+  shortSha,
+  tcApi,
+} from '../../integrations/teamcity.js';
 import { textResult } from '../../utils/helpers.js';
-import { createTokenReader } from '../../utils/tokens.js';
-
-export const TC_BASE = baseUrl(config.teamcity.url);
 
 /** Example config ID for tool descriptions, from the deployment's key configs. */
 export const EXAMPLE_CONFIG = config.teamcity.keyConfigs[0]?.id || 'Project_Build';
@@ -13,94 +19,6 @@ export const EXAMPLE_CONFIG = config.teamcity.keyConfigs[0]?.id || 'Project_Buil
 export const KEY_CONFIGS_HINT = config.teamcity.keyConfigs.length
   ? `Common configs: ${config.teamcity.keyConfigs.map((c) => `${c.id} (${c.description})`).join(', ')}. `
   : '';
-const FETCH_TIMEOUT_MS = 15_000;
-const MAX_CONCURRENT_TC = 4;
-
-const getToken = createTokenReader('TEAMCITY_TOKEN', '.teamcity_token');
-
-let _activeTcCalls = 0;
-const _tcQueue = [];
-
-function runNextTc() {
-  while (_tcQueue.length > 0 && _activeTcCalls < MAX_CONCURRENT_TC) {
-    const { run, resolve, reject } = _tcQueue.shift();
-    _activeTcCalls++;
-    run()
-      .then(resolve, reject)
-      .finally(() => {
-        _activeTcCalls--;
-        runNextTc();
-      });
-  }
-}
-
-/**
- * Encode a value for use inside a TeamCity locator. Test names routinely
- * contain locator syntax (`,` `:` `(` `)`), which makes TeamCity reject the
- * request with HTTP 400 even when URL-encoded. `$base64:` (base64url) is
- * TeamCity's escape for arbitrary values.
- * @param {string} value
- * @returns {string}
- */
-export function locatorValue(value) {
-  return `$base64:${Buffer.from(value, 'utf-8').toString('base64url')}`;
-}
-
-export function tcApi(path) {
-  const run = async () => {
-    const token = getToken();
-    if (!TC_BASE) throw new Error('TeamCity URL not configured (teamcity.url in fenix.config.json)');
-    if (!token) throw new Error('TeamCity authentication not configured');
-
-    const res = await fetch(`${TC_BASE}${path}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/json',
-      },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-
-    if (!res.ok) throw new Error(`TeamCity API error (HTTP ${res.status})`);
-    return res.json();
-  };
-
-  if (_activeTcCalls < MAX_CONCURRENT_TC) {
-    _activeTcCalls++;
-    return run().finally(() => {
-      _activeTcCalls--;
-      runNextTc();
-    });
-  }
-
-  return new Promise((resolve, reject) => {
-    _tcQueue.push({ run, resolve, reject });
-  });
-}
-
-export function tcFetchText(path) {
-  const run = async () => {
-    const token = getToken();
-    if (!TC_BASE) throw new Error('TeamCity URL not configured (teamcity.url in fenix.config.json)');
-    if (!token) throw new Error('TeamCity authentication not configured');
-    const res = await fetch(`${TC_BASE}${path}`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'text/plain' },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`TeamCity ${res.status}`);
-    return res.text();
-  };
-
-  if (_activeTcCalls < MAX_CONCURRENT_TC) {
-    _activeTcCalls++;
-    return run().finally(() => {
-      _activeTcCalls--;
-      runNextTc();
-    });
-  }
-  return new Promise((resolve, reject) => {
-    _tcQueue.push({ run, resolve, reject });
-  });
-}
 
 export const listRecentBuildsTool = tool(
   'teamcity_list_builds',
@@ -142,7 +60,7 @@ export const listRecentBuildsTool = tool(
 
       return textResult(lines.join('\n'));
     } catch (e) {
-      return textResult(`TeamCity error: ${e.message}`);
+      return textResult(`TeamCity error: ${e.message}`, true);
     }
   },
 );
@@ -171,11 +89,11 @@ export const getBuildDetailsTool = tool(
         `**Triggered by:** ${b.triggered?.user?.name || 'auto'}\n` +
         `**Agent:** ${b.agent?.name || '?'}\n` +
         `**Duration:** ${durationMin} min\n` +
-        `**Link:** ${TC_BASE}/buildConfiguration/${b.buildType?.id}/${b.id}`;
+        `**Link:** ${buildUrl(b.buildType?.id, b.id)}`;
 
       return textResult(text);
     } catch (e) {
-      return textResult(`TeamCity error: ${e.message}`);
+      return textResult(`TeamCity error: ${e.message}`, true);
     }
   },
 );
@@ -193,7 +111,7 @@ export const getBuildFailuresTool = tool(
       if (new_only) locator += ',newFailure:true';
 
       const data = await tcApi(
-        `/app/rest/testOccurrences?locator=${locator}&fields=count,testOccurrence(name,newFailure,duration,details)`,
+        `/app/rest/testOccurrences?locator=${locator}&fields=count,testOccurrence(name,newFailure,duration)`,
       );
       const tests = data.testOccurrence || [];
       const total = data.count || 0;
@@ -211,7 +129,7 @@ export const getBuildFailuresTool = tool(
       const summary = `**${total} failed tests** (${tests.filter((t) => t.newFailure).length} new):\n\n`;
       return textResult(summary + lines.join('\n'));
     } catch (e) {
-      return textResult(`TeamCity error: ${e.message}`);
+      return textResult(`TeamCity error: ${e.message}`, true);
     }
   },
 );
@@ -233,17 +151,13 @@ export const getBuildChangesTool = tool(
         return textResult('No changes found in this build.');
       }
 
-      const lines = changes.map((c) => {
-        const author = c.user?.name || c.username || 'unknown';
-        const sha = (c.version || '').slice(0, 8);
-        const comment = (c.comment || '').split('\n')[0].trim();
-        const fileCount = c.files?.file?.length || 0;
-        return `**${author}** \`${sha}\` — ${comment} (${fileCount} files)`;
-      });
+      const lines = changes.map(
+        (c) => `**${commitAuthor(c)}** \`${shortSha(c)}\` — ${commitTitle(c)} (${changedFiles(c).length} files)`,
+      );
 
       return textResult(`**${changes.length} change(s):**\n\n` + lines.join('\n'));
     } catch (e) {
-      return textResult(`TeamCity error: ${e.message}`);
+      return textResult(`TeamCity error: ${e.message}`, true);
     }
   },
 );
@@ -264,10 +178,23 @@ export const getTestDetailTool = tool(
       let tests = data.testOccurrence || [];
 
       if (tests.length === 0) {
+        // Substring match: list failure names only, then fetch details for the matches
         const allData = await tcApi(
-          `/app/rest/testOccurrences?locator=build:(id:${build_id}),status:FAILURE&fields=testOccurrence(name,details,newFailure,duration)`,
+          `/app/rest/testOccurrences?locator=build:(id:${build_id}),status:FAILURE&fields=testOccurrence(name)`,
         );
-        tests = (allData.testOccurrence || []).filter((t) => t.name.toLowerCase().includes(test_name.toLowerCase()));
+        /** @type {Array<{ name: string }>} */
+        const failed = allData.testOccurrence || [];
+        const names = failed.map((t) => t.name).filter((n) => n.toLowerCase().includes(test_name.toLowerCase()));
+        const detailed = await Promise.all(
+          names
+            .slice(0, 5)
+            .map((n) =>
+              tcApi(
+                `/app/rest/testOccurrences?locator=build:(id:${build_id}),status:FAILURE,test:(name:${locatorValue(n)})&fields=testOccurrence(name,details,newFailure,duration)`,
+              ),
+            ),
+        );
+        tests = detailed.flatMap((d) => d.testOccurrence || []);
       }
 
       if (tests.length === 0) {
@@ -281,7 +208,7 @@ export const getTestDetailTool = tool(
 
       return textResult(lines.join('\n\n'));
     } catch (e) {
-      return textResult(`TeamCity error: ${e.message}`);
+      return textResult(`TeamCity error: ${e.message}`, true);
     }
   },
 );
@@ -314,7 +241,7 @@ export const listBuildConfigsTool = tool(
       const lines = configs.map((c) => `\`${c.id}\` — ${c.name} (${c.projectName})`);
       return textResult(lines.join('\n'));
     } catch (e) {
-      return textResult(`TeamCity error: ${e.message}`);
+      return textResult(`TeamCity error: ${e.message}`, true);
     }
   },
 );

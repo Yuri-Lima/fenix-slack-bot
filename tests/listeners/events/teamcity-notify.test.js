@@ -5,6 +5,7 @@ import {
   expandErrorKeywords,
   extractBuildLogErrors,
   extractRealError,
+  formatAnalysis,
   scoreCommitsForError,
 } from '../../../listeners/events/teamcity-notify.js';
 
@@ -181,5 +182,42 @@ describe('extractBuildLogErrors', () => {
     const errors = extractBuildLogErrors(log);
     assert.equal(errors.length, 1);
     assert.ok(errors[0].includes('Lieferadresse'));
+  });
+});
+
+describe('formatAnalysis author ranking', () => {
+  const commit = (sha, user, comment, files) => ({
+    version: sha.padEnd(40, '0'),
+    username: user,
+    user: { name: user },
+    comment,
+    files: { file: files.map((f) => ({ file: f })) },
+  });
+
+  const analysis = (changes) => ({
+    details: { id: 7, number: '7', buildType: { id: 'Main_E2e', name: 'Main E2E' }, statistics: { property: [] } },
+    failures: { testOccurrence: [{ name: 'invoices: creates an invoice', newFailure: true, duration: 1000 }] },
+    changes: { change: changes },
+    flakyMap: new Map(),
+    historicalFileFreq: new Map(),
+    buildLogErrors: [],
+    errorOrigin: null,
+    originChanges: null,
+  });
+
+  it('ranks authors by score and lists their strongest commits first', () => {
+    const text = formatAnalysis(
+      analysis([
+        commit('bbbbbbb', 'bob.example', 'Tweak README wording', ['README.md']),
+        commit('aaaaaaa', 'alice.example', 'Invoice validation', ['packages/api/src/invoice/invoice.service.ts']),
+      ]),
+    );
+    const lines = text.split('\n');
+    const alice = lines.findIndex((l) => l.includes('*alice.example*'));
+    const bob = lines.findIndex((l) => l.includes('*bob.example*'));
+    assert.ok(alice !== -1 && bob !== -1, text);
+    assert.ok(alice < bob, 'author whose files match the failing test ranks first');
+    assert.match(lines[alice], /:first_place_medal:/);
+    assert.match(lines[alice + 1], /`aaaaaaa0` Invoice validation/);
   });
 });

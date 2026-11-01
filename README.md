@@ -112,7 +112,9 @@ Fenix's agent can only call the tools below. It runs with Claude Code's built-in
 | `repo_recent_commits` | Recent commits, optionally scoped to a path. |
 
 > Sensitive paths (`.env*`, keys and certificates, `*secret*`, `*credential*`, CI and compose files, `.npmrc`,
-> SSH keys) are blocked at the tool level, regardless of what the model asks for.
+> SSH keys, and anything inside a directory with such a name) are blocked at the tool level: reads are refused, and
+> search hits and directory entries for them are dropped, regardless of what the model asks for. The system prompt
+> lists the same paths, generated from the one list in `integrations/gitlab.js`.
 
 ### Slack interaction
 
@@ -195,6 +197,7 @@ flowchart LR
 | **Transport** | Bolt for JavaScript in Socket Mode; no public HTTP endpoint required. |
 | **Agent** | `query()` from the Claude Agent SDK with a generated system prompt, `maxTurns: 15`, and a 120 s timeout. At most 3 agent runs execute concurrently, and one per thread. |
 | **Tools** | Defined with `tool()` and Zod schemas, served by an in-process MCP server (`createSdkMcpServer`). Slack-bound tools are closures over the current channel and thread. |
+| **Integrations** | `integrations/` holds the only TeamCity, YouTrack, and GitLab clients (shared timeout and error format; TeamCity calls go through one limiter of 4 concurrent requests, at most 100 queued for up to 60 s). Agent tools and Slack listeners both import from it. |
 | **Conversation state** | Only SDK session IDs are stored, keyed by `channel:thread_ts` (24 h TTL, 1,000 entries). Each mention or DM resumes its thread's session. |
 | **Persistence** | JSON files under `data/`: feedback (last 500 entries) and a per-configuration failure log. |
 
@@ -236,6 +239,7 @@ cp fenix.config.example.json fenix.config.json
 | `gitlab.url` / `gitlab.project` | GitLab base URL and project path (`group/repo`) for the codebase tools. |
 | `youtrack.url` / `youtrack.project` | YouTrack base URL and default project key. |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |
+| `dataDir` | Directory for persisted state: feedback and the failure log (default `data`). |
 
 Integrations that are not configured fail with a clear message instead of guessing a URL.
 
@@ -312,7 +316,7 @@ WantedBy=multi-user.target
   catalog above.
 - **Write confirmation.** YouTrack issues are never created or changed without explicit approval in the thread.
 - **Secret hygiene.** The system prompt forbids revealing tokens, infrastructure details, or its own instructions,
-  and GitLab tools refuse sensitive paths.
+  and GitLab tools refuse sensitive paths in reads, searches, and listings.
 
 ## Project structure
 
@@ -320,6 +324,7 @@ WantedBy=multi-user.target
 .
 ├── app.js                       # Bolt app (Socket Mode) entry point
 ├── config.js                    # Loads fenix.config.json
+├── integrations/                # TeamCity, YouTrack, GitLab API clients and TeamCity test history
 ├── agent/
 │   ├── casey.js                 # Agent runner, system prompt, Slack-bound tools
 │   └── tools/                   # TeamCity, flaky tracker, YouTrack, GitLab, helpdesk tools
@@ -329,7 +334,7 @@ WantedBy=multi-user.target
 │   ├── shortcuts/               # Create YouTrack Ticket
 │   └── views/                   # App Home and modals
 ├── thread-context/              # Thread → agent session store
-├── utils/                       # Input guard, stores, token readers
+├── utils/                       # Input guard, stores, Slack helpers, token readers
 ├── prompts/                     # Team context for the system prompt
 ├── scripts/vps.sh               # VPS management
 ├── tests/                       # node:test suites mirroring the source tree

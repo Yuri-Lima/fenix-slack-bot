@@ -1,11 +1,24 @@
-import { classifyTest, getTestHistory } from '../../agent/tools/flaky-tracker.js';
-import { locatorValue, TC_BASE, tcApi, tcFetchText } from '../../agent/tools/teamcity.js';
 import { config } from '../../config.js';
+import {
+  buildUrl,
+  changedFiles,
+  commitAuthor,
+  commitTitle,
+  locatorValue,
+  shortSha,
+  TC_BASE,
+  tcApi,
+  tcFetchText,
+} from '../../integrations/teamcity.js';
+import { classifyTest, getTestHistory } from '../../integrations/test-history.js';
 import { recordBuildResults } from '../../utils/flaky-store.js';
 import { andMore, shortTestName } from '../../utils/helpers.js';
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const BUILD_URL_RE = TC_BASE ? new RegExp(`${escapeRegExp(TC_BASE)}/buildConfiguration/([^/|>]+)/(\\d+)`) : null;
+// Derived from buildUrl() so link format and link parsing cannot drift apart
+const BUILD_URL_RE = TC_BASE
+  ? new RegExp(escapeRegExp(buildUrl('CONFIG', 'BUILD')).replace('CONFIG', '([^/|>]+)').replace('BUILD', '(\\d+)'))
+  : null;
 
 export function parseBuildUrl(text) {
   const match = BUILD_URL_RE && text.match(BUILD_URL_RE);
@@ -15,55 +28,67 @@ export function parseBuildUrl(text) {
 
 // ── Historical correlation ──────────────────────────────────────────────
 
+/** Changed files per finished build. A finished build's changes never change, so entries never go stale. */
+const buildFilesCache = new Map();
+const BUILD_FILES_CACHE_MAX = 500;
+
 /**
- * For each new failing test, find past builds where it also failed and
- * collect the files that changed in those builds. Returns a frequency map:
- * filePath -> number of past-failure builds it appeared in.
- * Also returns per-test evidence: testName -> [{ file, count }].
+ * Files changed in a build, cached across analyses.
+ * @param {number} buildId
+ * @returns {Promise<string[]>}
+ */
+async function filesChangedInBuild(buildId) {
+  const cached = buildFilesCache.get(buildId);
+  if (cached) return cached;
+  let files = [];
+  try {
+    const data = await tcApi(`/app/rest/changes?locator=build:(id:${buildId})&fields=change(files(file(file)))`);
+    files = (data.change || []).flatMap(changedFiles);
+  } catch {
+    return [];
+  }
+  buildFilesCache.set(buildId, files);
+  if (buildFilesCache.size > BUILD_FILES_CACHE_MAX) {
+    buildFilesCache.delete(buildFilesCache.keys().next().value);
+  }
+  return files;
+}
+
+/**
+ * For new failing tests, find past builds where they also failed and count
+ * how often each file changed in those builds: lowercased filePath -> count.
+ * Lookups run in parallel (the TeamCity client caps concurrency).
  */
 async function getHistoricalCorrelation(newFailures, configId, currentBuildId) {
+  const names = newFailures
+    .slice(0, 5)
+    .map((t) => t.name || '')
+    .filter(Boolean);
+
+  const pastBuildLists = await Promise.all(
+    names.map(async (name) => {
+      try {
+        const occData = await tcApi(
+          `/app/rest/testOccurrences?locator=test:(name:${locatorValue(name)}),buildType:(id:${configId}),status:FAILURE,count:8&fields=testOccurrence(build(id))`,
+        );
+        const ids = (occData.testOccurrence || []).map((o) => o.build?.id).filter((id) => id && id !== currentBuildId);
+        return [...new Set(ids)].slice(0, 5);
+      } catch {
+        return [];
+      }
+    }),
+  );
+
+  // Each (test, past build) pair counts once, as before; builds shared by
+  // several tests are fetched once thanks to the cache.
+  const filesPerPair = await Promise.all(pastBuildLists.flat().map((bid) => filesChangedInBuild(bid)));
   const fileFreq = new Map();
-  const fetchedBuilds = new Map();
-
-  const testsToCheck = newFailures.slice(0, 5);
-
-  for (const test of testsToCheck) {
-    const name = test.name || '';
-    if (!name) continue;
-
-    let occData;
-    try {
-      occData = await tcApi(
-        `/app/rest/testOccurrences?locator=test:(name:${locatorValue(name)}),buildType:(id:${configId}),status:FAILURE,count:8&fields=testOccurrence(build(id))`,
-      );
-    } catch {
-      continue;
-    }
-
-    const buildIds = (occData.testOccurrence || []).map((o) => o.build?.id).filter((id) => id && id !== currentBuildId);
-
-    const uniqueIds = [...new Set(buildIds)].slice(0, 5);
-
-    for (const bid of uniqueIds) {
-      let changesForBuild = fetchedBuilds.get(bid);
-      if (!changesForBuild) {
-        try {
-          const data = await tcApi(`/app/rest/changes?locator=build:(id:${bid})&fields=change(files(file(file)))`);
-          changesForBuild = (data.change || []).flatMap((c) => (c.files?.file || []).map((f) => f.file));
-          fetchedBuilds.set(bid, changesForBuild);
-        } catch {
-          fetchedBuilds.set(bid, []);
-          continue;
-        }
-      }
-
-      for (const filePath of changesForBuild) {
-        const lower = filePath.toLowerCase();
-        fileFreq.set(lower, (fileFreq.get(lower) || 0) + 1);
-      }
+  for (const files of filesPerPair) {
+    for (const filePath of files) {
+      const lower = filePath.toLowerCase();
+      fileFreq.set(lower, (fileFreq.get(lower) || 0) + 1);
     }
   }
-
   return fileFreq;
 }
 
@@ -135,7 +160,7 @@ function extractTestKeywords(test) {
  * Returns { score, evidence[] } where evidence explains the signals found.
  */
 function scoreCommitRelevance(commit, newFailures, historicalFileFreq) {
-  const files = (commit.files?.file || []).map((f) => f.file.toLowerCase());
+  const files = changedFiles(commit).map((f) => f.toLowerCase());
   if (files.length === 0) return { score: 0, evidence: [] };
 
   const evidence = [];
@@ -351,9 +376,9 @@ export function scoreCommitsForError(commits, errorText) {
   const spaceVariants = keywords.map((kw) => kw.replace(/[-_]/g, ' '));
 
   return commits
-    .filter((c) => (c.files?.file?.length || 0) > 0)
+    .filter(hasFiles)
     .map((c) => {
-      const files = (c.files?.file || []).map((f) => f.file.toLowerCase());
+      const files = changedFiles(c).map((f) => f.toLowerCase());
       const matchedFiles = new Set();
       let codeFiles = 0;
 
@@ -471,20 +496,31 @@ async function findErrorOrigin(configId, currentBuildId, currentFingerprint) {
 
 // ── Build analysis ──────────────────────────────────────────────────────
 
+const CHANGE_FIELDS = 'change(id,version,username,user(name),comment,files(file(file)))';
+
+/**
+ * @param {number} buildId
+ * @returns {Promise<{ change?: import('../../integrations/teamcity.js').TcChange[] }>}
+ */
+function fetchBuildChanges(buildId) {
+  return tcApi(`/app/rest/changes?locator=build:(id:${buildId})&fields=${CHANGE_FIELDS}`);
+}
+
+/**
+ * @param {import('../../integrations/teamcity.js').TcChange} change
+ * @returns {boolean}
+ */
+const hasFiles = (change) => changedFiles(change).length > 0;
+
 async function analyzeBuild(buildId, configId) {
-  const [details, failures, changes, problems] = await Promise.all([
+  const [details, failures, changes] = await Promise.all([
     tcApi(
       `/app/rest/builds/id:${buildId}?fields=id,number,status,statusText,buildType(id,name),triggered(date,user(name)),agent(name),statistics(property(name,value))`,
     ),
     tcApi(
       `/app/rest/testOccurrences?locator=build:(id:${buildId}),status:FAILURE&fields=count,testOccurrence(name,newFailure,duration)`,
     ),
-    tcApi(
-      `/app/rest/changes?locator=build:(id:${buildId})&fields=change(id,version,username,user(name),comment,files(file(file)))`,
-    ),
-    tcApi(
-      `/app/rest/problemOccurrences?locator=build:(id:${buildId})&fields=problemOccurrence(id,type,identity,details)`,
-    ).catch(() => ({ problemOccurrence: [] })),
+    fetchBuildChanges(buildId),
   ]);
 
   const tests = failures.testOccurrence || [];
@@ -514,22 +550,19 @@ async function analyzeBuild(buildId, configId) {
   let originChanges = null;
 
   if (tests.length === 0) {
-    try {
-      const logText = await tcFetchText(`/downloadBuildLog.html?buildId=${buildId}&plain=true&lineCount=200`);
-      buildLogErrors = extractBuildLogErrors(logText);
-    } catch {
-      // build log unavailable, statusText still carries the error
-    }
-
     const fingerprint = errorFingerprint(details.statusText || '');
-    errorOrigin = await findErrorOrigin(configId, buildId, fingerprint);
+    [buildLogErrors, errorOrigin] = await Promise.all([
+      tcFetchText(`/downloadBuildLog.html?buildId=${buildId}&plain=true&lineCount=200`)
+        .then(extractBuildLogErrors)
+        // build log unavailable, statusText still carries the error
+        .catch(() => []),
+      findErrorOrigin(configId, buildId, fingerprint),
+    ]);
 
     if (errorOrigin) {
       try {
-        const oc = await tcApi(
-          `/app/rest/changes?locator=build:(id:${errorOrigin.buildId})&fields=change(id,version,username,user(name),comment,files(file(file)))`,
-        );
-        originChanges = (oc.change || []).filter((c) => (c.files?.file?.length || 0) > 0);
+        const oc = await fetchBuildChanges(errorOrigin.buildId);
+        originChanges = (oc.change || []).filter(hasFiles);
         if (originChanges.length === 0) originChanges = null;
       } catch {
         originChanges = null;
@@ -541,7 +574,6 @@ async function analyzeBuild(buildId, configId) {
     details,
     failures,
     changes,
-    problems,
     flakyMap,
     historicalFileFreq,
     buildLogErrors,
@@ -552,39 +584,46 @@ async function analyzeBuild(buildId, configId) {
 
 // ── Formatting ──────────────────────────────────────────────────────────
 
+const MEDALS = [':first_place_medal:', ':second_place_medal:', ':third_place_medal:'];
+const COMMITS_PER_AUTHOR = 3;
+
+/**
+ * Rank commit authors by their commits' total score and list each author's
+ * strongest commits with the evidence behind them. Shared by test-failure
+ * and build-error analysis.
+ * @param {string[]} lines - Output lines to append to
+ * @param {Array<{ commit: import('../../integrations/teamcity.js').TcChange, score: number, evidence?: string[], matchedFiles?: string[] }>} scored
+ * @returns {void}
+ */
 function pushAuthorRanking(lines, scored) {
   const byAuthor = new Map();
-  for (const { commit: c, score, matchedFiles } of scored) {
-    const author = c.user?.name || c.username || 'unknown';
-    if (!byAuthor.has(author))
-      byAuthor.set(author, { commits: [], totalScore: 0, totalFiles: 0, matchedFiles: new Set() });
+  for (const { commit, score, evidence = [], matchedFiles = [] } of scored) {
+    const author = commitAuthor(commit);
+    if (!byAuthor.has(author)) {
+      byAuthor.set(author, { commits: [], totalScore: 0, totalFiles: 0, evidence: new Set(), matchedFiles: new Set() });
+    }
     const entry = byAuthor.get(author);
-    entry.commits.push({ commit: c, score });
+    entry.commits.push({ commit, score });
     entry.totalScore += score;
-    entry.totalFiles += c.files?.file?.length || 0;
+    entry.totalFiles += changedFiles(commit).length;
+    for (const e of evidence) entry.evidence.add(e);
     for (const f of matchedFiles) entry.matchedFiles.add(f);
   }
 
   const sorted = [...byAuthor.entries()].sort((a, b) => b[1].totalScore - a[1].totalScore);
-  const medals = [':first_place_medal:', ':second_place_medal:', ':third_place_medal:'];
-
   sorted.forEach(([author, data], i) => {
-    const rank = medals[i] || `#${i + 1}`;
-    lines.push(
-      `  ${rank} *${author}* (${data.commits.length} commit${data.commits.length > 1 ? 's' : ''}, ${data.totalFiles} files)`,
-    );
-    const top = data.commits.sort((a, b) => b.score - a.score).slice(0, 2);
-    for (const { commit: c } of top) {
-      const sha = (c.version || '').slice(0, 8);
-      const comment = (c.comment || '').split('\n')[0].trim();
-      lines.push(`      \`${sha}\` ${comment.slice(0, 100)}`);
+    const rank = MEDALS[i] || `#${i + 1}`;
+    const n = data.commits.length;
+    lines.push(`  ${rank} *${author}* (${n} commit${n > 1 ? 's' : ''}, ${data.totalFiles} files)`);
+    const top = data.commits.sort((a, b) => b.score - a.score).slice(0, COMMITS_PER_AUTHOR);
+    for (const { commit } of top) {
+      lines.push(`      \`${shortSha(commit)}\` ${commitTitle(commit).slice(0, 100)}`);
     }
-    const moreCommits = andMore(data.commits.length, 2, '      ');
+    const moreCommits = andMore(n, COMMITS_PER_AUTHOR, '      ');
     if (moreCommits) lines.push(moreCommits);
     const mf = [...data.matchedFiles].slice(0, 3);
-    if (mf.length > 0) {
-      lines.push(`      :label: touches \`${mf.join('`, `')}\``);
-    }
+    if (mf.length > 0) lines.push(`      :label: touches \`${mf.join('`, `')}\``);
+    for (const e of [...data.evidence].slice(0, 2)) lines.push(`      ${e}`);
   });
 }
 
@@ -617,7 +656,7 @@ export function formatAnalysis({
   const brokenPre = preExisting.filter((t) => !flakyMap.has(t.name));
   const totalFlaky = flakyNew.length + flakyPre.length;
 
-  const buildLink = `${TC_BASE}/buildConfiguration/${b.buildType?.id}/${b.id}`;
+  const buildLink = buildUrl(b.buildType?.id, b.id);
   const configName = b.buildType?.name || b.buildType?.id;
   const agentName = b.agent?.name || '?';
 
@@ -635,50 +674,12 @@ export function formatAnalysis({
     if (moreNew) lines.push(moreNew);
 
     // Likely cause with enriched scoring
-    const realCommits = commits.filter((c) => (c.files?.file?.length || 0) > 0);
+    const realCommits = commits.filter(hasFiles);
     if (realCommits.length > 0) {
-      const scored = realCommits
-        .map((c) => ({ commit: c, ...scoreCommitRelevance(c, realNew, historicalFileFreq) }))
-        .sort((a, b) => b.score - a.score);
-
-      const byAuthor = new Map();
-      for (const { commit: c, score, evidence } of scored) {
-        const author = c.user?.name || c.username || 'unknown';
-        if (!byAuthor.has(author)) byAuthor.set(author, { commits: [], totalScore: 0, totalFiles: 0, evidence: [] });
-        const entry = byAuthor.get(author);
-        entry.commits.push(c);
-        entry.totalScore += score;
-        entry.totalFiles += c.files?.file?.length || 0;
-        for (const e of evidence) {
-          if (!entry.evidence.includes(e)) entry.evidence.push(e);
-        }
-      }
-
-      const sortedAuthors = [...byAuthor.entries()].sort((a, b) => b[1].totalScore - a[1].totalScore);
-
+      const scored = realCommits.map((c) => ({ commit: c, ...scoreCommitRelevance(c, realNew, historicalFileFreq) }));
       lines.push('');
       lines.push('*:bust_in_silhouette: Likely cause:*');
-
-      const medals = [':first_place_medal:', ':second_place_medal:', ':third_place_medal:'];
-      sortedAuthors.forEach(([author, data], i) => {
-        const rank = medals[i] || `#${i + 1}`;
-        const topCommits = data.commits
-          .sort((a, b) => (b.files?.file?.length || 0) - (a.files?.file?.length || 0))
-          .slice(0, 3);
-        lines.push(
-          `  ${rank} *${author}* (${data.commits.length} commit${data.commits.length > 1 ? 's' : ''}, ${data.totalFiles} files)`,
-        );
-        for (const c of topCommits) {
-          const sha = (c.version || '').slice(0, 8);
-          const comment = (c.comment || '').split('\n')[0].trim();
-          lines.push(`      \`${sha}\` ${comment}`);
-        }
-        const moreCommits = andMore(data.commits.length, 3, '      ');
-        if (moreCommits) lines.push(moreCommits);
-        for (const e of data.evidence.slice(0, 2)) {
-          lines.push(`      ${e}`);
-        }
-      });
+      pushAuthorRanking(lines, scored);
     }
   }
 
@@ -730,11 +731,11 @@ export function formatAnalysis({
       lines.push('_No test failures and no build problems reported._');
     }
 
-    const currentCommits = commits.filter((c) => (c.files?.file?.length || 0) > 0);
+    const currentCommits = commits.filter(hasFiles);
     const errorForScoring = coreError || (buildLogErrors || []).join(' ') || b.statusText || '';
 
     if (errorOrigin) {
-      const originLink = `${TC_BASE}/buildConfiguration/${b.buildType?.id}/${errorOrigin.buildId}`;
+      const originLink = buildUrl(b.buildType?.id, errorOrigin.buildId);
       const streak = errorOrigin.priorFailures + 1;
       const since =
         errorOrigin.boundary === 'green'
@@ -758,10 +759,7 @@ export function formatAnalysis({
         lines.push('');
         lines.push('*Commits in this build* (_error predates them, probably not the cause_):');
         for (const c of currentCommits.slice(0, 4)) {
-          const author = c.user?.name || c.username || 'unknown';
-          const sha = (c.version || '').slice(0, 8);
-          const comment = (c.comment || '').split('\n')[0].trim();
-          lines.push(`  - ${author}: \`${sha}\` ${comment.slice(0, 90)}`);
+          lines.push(`  - ${commitAuthor(c)}: \`${shortSha(c)}\` ${commitTitle(c).slice(0, 90)}`);
         }
         const moreC = andMore(currentCommits.length, 4);
         if (moreC) lines.push(moreC);

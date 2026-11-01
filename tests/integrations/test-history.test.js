@@ -1,6 +1,4 @@
 import assert from 'node:assert';
-import { rmSync } from 'node:fs';
-import { join } from 'node:path';
 import { after, afterEach, beforeEach, describe, it, mock } from 'node:test';
 
 import {
@@ -11,8 +9,8 @@ import {
   getTestHistory,
   MIN_RUNS,
   parseTcDate,
-} from '../../../agent/tools/flaky-tracker.js';
-import { recordBuildResults } from '../../../utils/flaky-store.js';
+} from '../../integrations/test-history.js';
+import { flushFailureLog, recordBuildResults } from '../../utils/flaky-store.js';
 
 const DAY = 86_400_000;
 
@@ -78,8 +76,8 @@ describe('getTestHistory', () => {
     globalThis.fetch = originalFetch;
   });
 
-  after(() => {
-    rmSync(join(import.meta.dirname, '../../../data/flaky', `${CONFIG}.json`), { force: true });
+  after(async () => {
+    await flushFailureLog();
   });
 
   it('takes fail rates from TeamCity even when the failure log has many failures', async () => {

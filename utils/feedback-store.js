@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { config, resolvePath } from '../config.js';
 
-const DATA_DIR = join(import.meta.dirname, '..', 'data');
+const DATA_DIR = resolvePath(config.dataDir);
 const FEEDBACK_FILE = join(DATA_DIR, 'feedback.json');
 const MAX_ENTRIES = 500;
 

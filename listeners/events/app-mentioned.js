@@ -1,23 +1,8 @@
 import { sessionStore } from '../../thread-context/index.js';
 import { GENERIC_ERROR_MESSAGE, gateRequest, isWhitelisted } from '../../utils/input-guard.js';
+import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
 import { handleDeleteCommand, isDeleteCommand } from './delete-thread.js';
-
-const userNameCache = new Map();
-const USER_CACHE_TTL = 30 * 60_000;
-
-async function resolveUserName(client, userId) {
-  const cached = userNameCache.get(userId);
-  if (cached && Date.now() - cached.ts < USER_CACHE_TTL) return cached.name;
-  try {
-    const info = await client.users.info({ user: userId });
-    const name = info.user?.real_name || userId;
-    userNameCache.set(userId, { name, ts: Date.now() });
-    return name;
-  } catch {
-    return userId;
-  }
-}
 
 /**
  * Handle app_mention events and run the Casey agent.

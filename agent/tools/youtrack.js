@@ -1,44 +1,18 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { baseUrl, config } from '../../config.js';
+import {
+  createIssue,
+  DEFAULT_PRIORITY,
+  DEFAULT_TYPE,
+  enumField,
+  issueUrl,
+  stateField,
+  userField,
+  validateIssueId,
+  YT_PROJECT,
+  ytApi,
+} from '../../integrations/youtrack.js';
 import { textResult, ytField } from '../../utils/helpers.js';
-import { createTokenReader } from '../../utils/tokens.js';
-
-export const YT_BASE = baseUrl(config.youtrack.url);
-const YT_PROJECT = config.youtrack.project;
-const FETCH_TIMEOUT_MS = 15_000;
-const ISSUE_ID_RE = /^[A-Z]+-\d+$/;
-
-const getToken = createTokenReader('YOUTRACK_API_TOKEN', '.youtrack_token');
-
-function validateIssueId(id) {
-  if (!ISSUE_ID_RE.test(id)) throw new Error(`Invalid issue ID format: "${id}"`);
-  return encodeURIComponent(id);
-}
-
-async function ytApi(path, { method = 'GET', body } = {}) {
-  const token = getToken();
-  if (!YT_BASE) throw new Error('YouTrack URL not configured (youtrack.url in fenix.config.json)');
-  if (!token) throw new Error('YouTrack authentication not configured');
-
-  const opts = {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  };
-  if (body) opts.body = JSON.stringify(body);
-
-  const res = await fetch(`${YT_BASE}${path}`, opts);
-  if (!res.ok) {
-    throw new Error(`YouTrack API error (HTTP ${res.status})`);
-  }
-  if (res.status === 204) return null;
-  return res.json();
-}
 
 export const searchIssuesTool = tool(
   'youtrack_search',
@@ -74,7 +48,7 @@ export const searchIssuesTool = tool(
 
       return textResult(`**${issues.length} issue(s):**\n\n` + lines.join('\n\n'));
     } catch (e) {
-      return textResult(`YouTrack error: ${e.message}`);
+      return textResult(`YouTrack error: ${e.message}`, true);
     }
   },
 );
@@ -114,7 +88,7 @@ export const getIssueTool = tool(
         `**Type:** ${type} | **State:** ${state} | **Priority:** ${priority}\n` +
         `**Assignee:** ${assignee} | **Tags:** ${tags}\n` +
         `**Reporter:** ${issue.reporter?.fullName || '?'}\n` +
-        `**Link:** ${YT_BASE}/issue/${issue.idReadable}\n\n` +
+        `**Link:** ${issueUrl(issue.idReadable)}\n\n` +
         `**Description:**\n${desc}`;
 
       if (links.length > 0) text += `\n\n**Links:**\n${links.join('\n')}`;
@@ -122,7 +96,7 @@ export const getIssueTool = tool(
 
       return textResult(text);
     } catch (e) {
-      return textResult(`YouTrack error: ${e.message}`);
+      return textResult(`YouTrack error: ${e.message}`, true);
     }
   },
 );
@@ -134,43 +108,19 @@ export const createIssueTool = tool(
     summary: z.string().describe('Issue title/summary.'),
     description: z.string().describe('Issue description (Markdown supported).').optional(),
     project: z.string().describe(`Project key (default "${YT_PROJECT}").`).optional(),
-    type: z.string().describe('Issue type: Task, Bug, Feature, etc. (default "Task").').optional(),
-    priority: z.string().describe('Priority: Critical, Major, Normal, Minor (default "Normal").').optional(),
+    type: z.string().describe(`Issue type: Task, Bug, Feature, etc. (default "${DEFAULT_TYPE}").`).optional(),
+    priority: z
+      .string()
+      .describe(`Priority: Critical, Major, Normal, Minor (default "${DEFAULT_PRIORITY}").`)
+      .optional(),
     assignee: z.string().describe('Assignee login (e.g. "jane.doe"). Omit for unassigned.').optional(),
   },
-  async ({ summary, description, project = YT_PROJECT, type = 'Task', priority = 'Normal', assignee }) => {
+  async ({ summary, description, project, type, priority, assignee }) => {
     try {
-      const customFields = [
-        { name: 'Type', $type: 'SingleEnumIssueCustomField', value: { name: type, $type: 'EnumBundleElement' } },
-        {
-          name: 'Priority',
-          $type: 'SingleEnumIssueCustomField',
-          value: { name: priority, $type: 'EnumBundleElement' },
-        },
-      ];
-
-      if (assignee) {
-        customFields.push({
-          name: 'Assignee',
-          $type: 'SingleUserIssueCustomField',
-          value: { login: assignee, $type: 'User' },
-        });
-      }
-
-      const body = {
-        summary,
-        description: description || '',
-        project: { shortName: project, $type: 'Project' },
-        customFields,
-      };
-
-      const issue = await ytApi('/api/issues?fields=idReadable,summary', { method: 'POST', body });
-
-      return textResult(
-        `Issue created: **${issue.idReadable}** — ${issue.summary}\n${YT_BASE}/issue/${issue.idReadable}`,
-      );
+      const issue = await createIssue({ summary, description, project, type, priority, assignee });
+      return textResult(`Issue created: **${issue.idReadable}** — ${issue.summary}\n${issueUrl(issue.idReadable)}`);
     } catch (e) {
-      return textResult(`YouTrack error: ${e.message}`);
+      return textResult(`YouTrack error: ${e.message}`, true);
     }
   },
 );
@@ -202,27 +152,9 @@ export const updateIssueTool = tool(
 
       if (state || assignee || priority) {
         const customFields = [];
-        if (state) {
-          customFields.push({
-            name: 'State',
-            $type: 'StateIssueCustomField',
-            value: { name: state, $type: 'StateBundleElement' },
-          });
-        }
-        if (assignee) {
-          customFields.push({
-            name: 'Assignee',
-            $type: 'SingleUserIssueCustomField',
-            value: { login: assignee, $type: 'User' },
-          });
-        }
-        if (priority) {
-          customFields.push({
-            name: 'Priority',
-            $type: 'SingleEnumIssueCustomField',
-            value: { name: priority, $type: 'EnumBundleElement' },
-          });
-        }
+        if (state) customFields.push(stateField(state));
+        if (assignee) customFields.push(userField('Assignee', assignee));
+        if (priority) customFields.push(enumField('Priority', priority));
         await ytApi(`/api/issues/${safeId}?fields=idReadable`, {
           method: 'POST',
           body: { customFields },
@@ -240,9 +172,9 @@ export const updateIssueTool = tool(
         updates.push('comment added');
       }
 
-      return textResult(`**${issue_id}** updated: ${updates.join(', ')}\n${YT_BASE}/issue/${issue_id}`);
+      return textResult(`**${issue_id}** updated: ${updates.join(', ')}\n${issueUrl(issue_id)}`);
     } catch (e) {
-      return textResult(`YouTrack error: ${e.message}`);
+      return textResult(`YouTrack error: ${e.message}`, true);
     }
   },
 );
@@ -281,7 +213,7 @@ export const myIssuesTool = tool(
 
       return textResult(`**${issues.length} open issue(s):**\n\n` + lines.join('\n'));
     } catch (e) {
-      return textResult(`YouTrack error: ${e.message}`);
+      return textResult(`YouTrack error: ${e.message}`, true);
     }
   },
 );

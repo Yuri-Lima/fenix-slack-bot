@@ -51,6 +51,7 @@ npm test             # Run all tests
 ### Conventions
 
 - Test files live in `tests/` and mirror the source directory structure
+- Tests run with `tests/fixtures/fenix.config.json`, whose `dataDir` is `tests/.data`, so they never touch real data in `data/`
 - File naming: `<source-file>.test.js` (not `.spec.js`)
 - Use `describe()` / `it()` / `beforeEach()` blocks from `node:test`
 - Use `mock.fn()` from `node:test` for mocking — no external mock libraries
@@ -86,6 +87,12 @@ The store uses a `Map` keyed by `${channelId}:${threadTs}` with TTL-based cleanu
 ### Dependency Injection
 
 `runCaseyAgent(text, sessionId, deps)` accepts an optional `deps` object with `{ client, channelId, threadTs, messageTs, userId, userName }`. Tools that need Slack API access (emoji reactions, mark resolved) are created as closures inside `runCaseyAgent()` that capture the `deps` parameter. Static tools (knowledge base, tickets, etc.) remain as module-level exports in `agent/tools/`.
+
+### Integrations
+
+`integrations/` is the single home of external API access: `http.js` (shared timeout, `requireConfigured`, uniform `<Service> API error (HTTP n)`), `teamcity.js` (client, request limiter, `locatorValue`, `buildUrl`, change helpers), `test-history.js` (TeamCity pass/fail history, flaky thresholds, classification), `youtrack.js` (client, attachment upload, issue URL, custom-field builders, issue types/priorities), and `gitlab.js` (client, blocked-path list). Agent tools in `agent/tools/` and Slack listeners import from here; never call these services with `fetch` directly or create a second token reader. Slack user names resolve through `utils/slack.js`.
+
+Tool handlers return `textResult(message, true)` from every `catch`, so the agent sees failures as errors.
 
 ### Tool Definitions
 

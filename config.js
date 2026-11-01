@@ -20,6 +20,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {{ url: string | null, project: string | null }} gitlab
  * @property {{ url: string | null, project: string }} youtrack
  * @property {string} contextFile - Markdown appended to the system prompt (team-specific knowledge)
+ * @property {string} dataDir - Directory for persisted state (feedback, failure log), relative to the project root
  */
 
 /** @type {FenixConfig} */
@@ -32,6 +33,7 @@ const DEFAULTS = {
   gitlab: { url: null, project: null },
   youtrack: { url: null, project: 'DEV' },
   contextFile: 'prompts/context.local.md',
+  dataDir: 'data',
 };
 
 /**

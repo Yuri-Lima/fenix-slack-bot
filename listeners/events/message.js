@@ -1,6 +1,7 @@
 import { config } from '../../config.js';
 import { sessionStore } from '../../thread-context/index.js';
 import { GENERIC_ERROR_MESSAGE, gateRequest, isWhitelisted } from '../../utils/input-guard.js';
+import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
 
 /**
@@ -22,22 +23,6 @@ function isGenericMessageEvent(event) {
 function getIssueMetadata(event) {
   const metadata = /** @type {any} */ (event).metadata;
   return metadata?.event_type === 'issue_submission' ? metadata : null;
-}
-
-const userNameCache = new Map();
-const USER_CACHE_TTL = 30 * 60_000;
-
-async function resolveUserName(client, userId) {
-  const cached = userNameCache.get(userId);
-  if (cached && Date.now() - cached.ts < USER_CACHE_TTL) return cached.name;
-  try {
-    const info = await client.users.info({ user: userId });
-    const name = info.user?.real_name || userId;
-    userNameCache.set(userId, { name, ts: Date.now() });
-    return name;
-  } catch {
-    return userId;
-  }
 }
 
 async function forwardDmToOwner(client, event, logger) {

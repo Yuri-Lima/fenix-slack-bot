@@ -1,78 +1,10 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { baseUrl, config } from '../../config.js';
+import { glProjectApi, glRawFile, isBlockedPath } from '../../integrations/gitlab.js';
 import { andMore, textResult } from '../../utils/helpers.js';
-import { createTokenReader } from '../../utils/tokens.js';
 
-export const GL_BASE = baseUrl(config.gitlab.url);
-const PROJECT_PATH = config.gitlab.project ? encodeURIComponent(config.gitlab.project) : null;
-const FETCH_TIMEOUT_MS = 15_000;
 const MAX_FILE_CHARS = 25_000;
-
-const BLOCKED_PATH_PATTERNS = [
-  /\.env($|\.)/i,
-  /\.gitlab-ci/i,
-  /docker-compose/i,
-  /\.(pem|key|p12|pfx|jks|keystore)$/i,
-  /secret/i,
-  /credential/i,
-  /\.netrc$/i,
-  /\.npmrc$/i,
-  /\.pypirc$/i,
-  /id_rsa/i,
-  /id_ed25519/i,
-];
-
-function isBlockedPath(filePath) {
-  const name = filePath.split('/').pop() || filePath;
-  return BLOCKED_PATH_PATTERNS.some((p) => p.test(name));
-}
-
-const getToken = createTokenReader('GITLAB_TOKEN', '.gitlab_token');
-
-async function glApi(path, params = {}) {
-  const token = getToken();
-  if (!GL_BASE || !PROJECT_PATH)
-    throw new Error('GitLab not configured (gitlab.url and gitlab.project in fenix.config.json)');
-  if (!token) throw new Error('GitLab authentication not configured');
-
-  const url = new URL(`${GL_BASE}/api/v4${path}`);
-  for (const [k, v] of Object.entries(params)) {
-    if (v != null) url.searchParams.set(k, String(v));
-  }
-
-  const res = await fetch(url, {
-    headers: { 'PRIVATE-TOKEN': token, Accept: 'application/json' },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-
-  if (!res.ok) {
-    throw new Error(`GitLab API error (HTTP ${res.status})`);
-  }
-  return res.json();
-}
-
-async function glRaw(filePath, ref = 'main') {
-  const token = getToken();
-  if (!GL_BASE || !PROJECT_PATH)
-    throw new Error('GitLab not configured (gitlab.url and gitlab.project in fenix.config.json)');
-  if (!token) throw new Error('GitLab authentication not configured');
-
-  const encoded = encodeURIComponent(filePath);
-  const url = new URL(`${GL_BASE}/api/v4/projects/${PROJECT_PATH}/repository/files/${encoded}/raw`);
-  url.searchParams.set('ref', ref);
-
-  const res = await fetch(url, {
-    headers: { 'PRIVATE-TOKEN': token },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-
-  if (!res.ok) {
-    if (res.status === 404) throw new Error(`File not found: ${filePath} (ref: ${ref})`);
-    throw new Error(`GitLab API error (HTTP ${res.status})`);
-  }
-  return res.text();
-}
+const RESTRICTED = 'This path is restricted for security reasons.';
 
 export const searchCodeTool = tool(
   'repo_search_code',
@@ -85,14 +17,19 @@ export const searchCodeTool = tool(
   },
   async ({ query, ref }) => {
     try {
-      const results = await glApi(`/projects/${PROJECT_PATH}/search`, {
+      /** @type {Array<{ filename: string, path: string, startline: number, data?: string }>} */
+      const found = await glProjectApi('/search', {
         scope: 'blobs',
         search: query,
         ref: ref || 'main',
         per_page: 15,
       });
+      // Snippets are file content, so restricted files are dropped entirely
+      const results = found.filter((r) => !isBlockedPath(r.path));
+      const hidden = found.length - results.length;
+      const hiddenNote = hidden > 0 ? ` (${hidden} restricted result(s) hidden)` : '';
 
-      if (!results.length) return textResult(`No results found for "${query}"`);
+      if (!results.length) return textResult(`No results found for "${query}"${hiddenNote}`);
 
       const lines = results.map((r) => {
         const snippet = (r.data || '').trim();
@@ -100,7 +37,7 @@ export const searchCodeTool = tool(
         return `**${r.filename}** (line ${r.startline})\n\`${r.path}\`\n\`\`\`\n${truncated}\n\`\`\``;
       });
 
-      return textResult(`Found ${results.length} results for "${query}":\n\n${lines.join('\n\n')}`);
+      return textResult(`Found ${results.length} results for "${query}"${hiddenNote}:\n\n${lines.join('\n\n')}`);
     } catch (e) {
       return textResult(`Search failed: ${e.message}`, true);
     }
@@ -120,10 +57,8 @@ export const readFileTool = tool(
   },
   async ({ path, ref, start_line, end_line }) => {
     try {
-      if (isBlockedPath(path)) {
-        return textResult('This file type is restricted for security reasons.', true);
-      }
-      let content = await glRaw(path, ref || 'main');
+      if (isBlockedPath(path)) return textResult(RESTRICTED, true);
+      let content = await glRawFile(path, ref || 'main');
 
       if (start_line || end_line) {
         const lines = content.split('\n');
@@ -164,13 +99,16 @@ export const listFilesTool = tool(
   },
   async ({ path, ref, recursive }) => {
     try {
-      const items = await glApi(`/projects/${PROJECT_PATH}/repository/tree`, {
+      if (path && isBlockedPath(path)) return textResult(RESTRICTED, true);
+      /** @type {Array<{ name: string, path: string, type: string }>} */
+      const listed = await glProjectApi('/repository/tree', {
         path: path || '',
         ref: ref || 'main',
         recursive: recursive ? 'true' : 'false',
         per_page: 100,
       });
 
+      const items = listed.filter((i) => !isBlockedPath(i.path));
       if (!items.length) return textResult(`No files found at "${path || '/'}"`);
 
       const dirs = items.filter((i) => i.type === 'tree').map((i) => `  ${i.name}/`);
@@ -180,7 +118,7 @@ export const listFilesTool = tool(
       if (dirs.length) parts.push('Directories:\n' + dirs.join('\n'));
       if (files.length) parts.push('Files:\n' + files.join('\n'));
 
-      const more = andMore(items.length, 100, '');
+      const more = andMore(listed.length, 100, '');
       if (more) parts.push(more);
 
       return textResult(parts.join('\n\n'));
@@ -202,13 +140,15 @@ export const recentCommitsTool = tool(
   },
   async ({ path, ref, count }) => {
     try {
+      if (path && isBlockedPath(path)) return textResult(RESTRICTED, true);
+      /** @type {Record<string, string | number>} */
       const params = {
         ref_name: ref || 'main',
         per_page: count || 10,
       };
       if (path) params.path = path;
 
-      const commits = await glApi(`/projects/${PROJECT_PATH}/repository/commits`, params);
+      const commits = await glProjectApi('/repository/commits', params);
 
       if (!commits.length) return textResult(`No commits found${path ? ` for "${path}"` : ''}`);
 

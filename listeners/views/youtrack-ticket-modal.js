@@ -1,30 +1,15 @@
-import { YT_BASE } from '../../agent/tools/youtrack.js';
-import { config } from '../../config.js';
-import { createTokenReader } from '../../utils/tokens.js';
+import { FETCH_TIMEOUT_MS } from '../../integrations/http.js';
+import {
+  issueUrl as buildIssueUrl,
+  createIssue,
+  DEFAULT_PRIORITY,
+  DEFAULT_TYPE,
+  ytUploadAttachment,
+} from '../../integrations/youtrack.js';
 
-const getYtToken = createTokenReader('YOUTRACK_API_TOKEN', '.youtrack_token');
-const getSlackToken = createTokenReader('SLACK_BOT_TOKEN', '.slack_bot_token');
-
-const FETCH_TIMEOUT_MS = 15_000;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-
-async function uploadFileToYouTrack(ytToken, issueId, fileName, fileBuffer, mimeType, logger) {
-  const formData = new FormData();
-  formData.append('file', new Blob([fileBuffer], { type: mimeType }), fileName);
-
-  const res = await fetch(`${YT_BASE}/api/issues/${issueId}/attachments?fields=id,name`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${ytToken}` },
-    body: formData,
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => '');
-    logger?.warn(`Failed to upload ${fileName} to ${issueId}: ${res.status} ${err.slice(0, 100)}`);
-    return null;
-  }
-  return res.json();
-}
+/** Slack file downloads can be large, so they get a longer timeout than API calls. */
+const DOWNLOAD_TIMEOUT_MS = 2 * FETCH_TIMEOUT_MS;
 
 /**
  * Handle the YouTrack ticket modal submission.
@@ -33,14 +18,14 @@ async function uploadFileToYouTrack(ytToken, issueId, fileName, fileBuffer, mime
  *
  * @param {import('@slack/bolt').AllMiddlewareArgs & import('@slack/bolt').SlackViewMiddlewareArgs} args
  */
-export async function handleYouTrackTicketModal({ ack, body, client, logger }) {
+export async function handleYouTrackTicketModal({ ack, body, client, context, logger }) {
   await ack();
 
   try {
     const values = body.view.state.values;
     const summary = values.summary_block.summary_input.value;
-    const type = values.type_block.type_select.selected_option?.value || 'Task';
-    const priority = values.priority_block.priority_select.selected_option?.value || 'Normal';
+    const type = values.type_block.type_select.selected_option?.value || DEFAULT_TYPE;
+    const priority = values.priority_block.priority_select.selected_option?.value || DEFAULT_PRIORITY;
     const extra = values.extra_block?.extra_input?.value || '';
 
     const meta = JSON.parse(body.view.private_metadata || '{}');
@@ -50,44 +35,14 @@ export async function handleYouTrackTicketModal({ ack, body, client, logger }) {
       `## Original message\n**From:** ${authorName}\n\n> ${messageText}` +
       (extra ? `\n\n## Additional context\n${extra}` : '');
 
-    const ytToken = getYtToken();
-    if (!ytToken) {
-      throw new Error('No YouTrack token configured');
-    }
-
-    const customFields = [
-      { name: 'Type', $type: 'SingleEnumIssueCustomField', value: { name: type, $type: 'EnumBundleElement' } },
-      { name: 'Priority', $type: 'SingleEnumIssueCustomField', value: { name: priority, $type: 'EnumBundleElement' } },
-    ];
-
-    const res = await fetch(`${YT_BASE}/api/issues?fields=idReadable,summary`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${ytToken}`,
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        summary,
-        description,
-        project: { shortName: config.youtrack.project, $type: 'Project' },
-        customFields,
-      }),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      throw new Error(`YouTrack API ${res.status}: ${errText.slice(0, 200)}`);
-    }
-
-    const issue = await res.json();
-    const issueUrl = `${YT_BASE}/issue/${issue.idReadable}`;
+    const issue = await createIssue({ summary, description, type, priority });
+    const issueUrl = buildIssueUrl(issue.idReadable);
 
     // Upload Slack file attachments to the YouTrack issue
     let uploadedCount = 0;
     if (files?.length) {
-      const slackToken = getSlackToken();
+      // Same bot token Bolt uses for this request; url_private needs it
+      const slackToken = context.botToken;
       if (slackToken) {
         for (const file of files) {
           try {
@@ -97,7 +52,7 @@ export async function handleYouTrackTicketModal({ ack, body, client, logger }) {
             }
             const dlRes = await fetch(file.url, {
               headers: { Authorization: `Bearer ${slackToken}` },
-              signal: AbortSignal.timeout(30_000),
+              signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
             });
             if (!dlRes.ok) {
               logger.warn(`Failed to download Slack file ${file.name}: ${dlRes.status}`);
@@ -110,15 +65,8 @@ export async function handleYouTrackTicketModal({ ack, body, client, logger }) {
               );
               continue;
             }
-            const uploaded = await uploadFileToYouTrack(
-              ytToken,
-              issue.idReadable,
-              file.name,
-              buffer,
-              file.mimetype,
-              logger,
-            );
-            if (uploaded) uploadedCount++;
+            await ytUploadAttachment(issue.idReadable, file.name, buffer, file.mimetype);
+            uploadedCount++;
           } catch (err) {
             logger.warn(`Error processing file ${file.name}: ${err.message}`);
           }

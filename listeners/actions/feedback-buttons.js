@@ -1,4 +1,5 @@
 import { addFeedback } from '../../utils/feedback-store.js';
+import { resolveUserName } from '../../utils/slack.js';
 
 /**
  * Handle feedback button interactions.
@@ -14,11 +15,7 @@ export async function handleFeedbackButton({ ack, body, client, context, logger 
     const messageTs = /** @type {string} */ (body.message?.ts);
     const feedbackValue = body.actions[0].value;
 
-    let userName = userId;
-    try {
-      const info = await client.users.info({ user: userId });
-      userName = info.user?.real_name || userId;
-    } catch {}
+    const userName = await resolveUserName(client, userId);
 
     if (feedbackValue === 'good-feedback') {
       addFeedback({
