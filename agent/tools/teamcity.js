@@ -34,6 +34,18 @@ function runNextTc() {
   }
 }
 
+/**
+ * Encode a value for use inside a TeamCity locator. Test names routinely
+ * contain locator syntax (`,` `:` `(` `)`), which makes TeamCity reject the
+ * request with HTTP 400 even when URL-encoded. `$base64:` (base64url) is
+ * TeamCity's escape for arbitrary values.
+ * @param {string} value
+ * @returns {string}
+ */
+export function locatorValue(value) {
+  return `$base64:${Buffer.from(value, 'utf-8').toString('base64url')}`;
+}
+
 export function tcApi(path) {
   const run = async () => {
     const token = getToken();
@@ -246,7 +258,7 @@ export const getTestDetailTool = tool(
   async ({ build_id, test_name }) => {
     try {
       const data = await tcApi(
-        `/app/rest/testOccurrences?locator=build:(id:${build_id}),status:FAILURE,test:(name:${encodeURIComponent(test_name)})&fields=testOccurrence(name,details,newFailure,duration)`,
+        `/app/rest/testOccurrences?locator=build:(id:${build_id}),status:FAILURE,test:(name:${locatorValue(test_name)})&fields=testOccurrence(name,details,newFailure,duration)`,
       );
 
       let tests = data.testOccurrence || [];

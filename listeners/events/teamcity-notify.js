@@ -1,5 +1,5 @@
 import { classifyTest, getTestHistory } from '../../agent/tools/flaky-tracker.js';
-import { TC_BASE, tcApi, tcFetchText } from '../../agent/tools/teamcity.js';
+import { locatorValue, TC_BASE, tcApi, tcFetchText } from '../../agent/tools/teamcity.js';
 import { config } from '../../config.js';
 import { recordBuildResults } from '../../utils/flaky-store.js';
 import { andMore, shortTestName } from '../../utils/helpers.js';
@@ -34,7 +34,7 @@ async function getHistoricalCorrelation(newFailures, configId, currentBuildId) {
     let occData;
     try {
       occData = await tcApi(
-        `/app/rest/testOccurrences?locator=test:(name:${encodeURIComponent(name)}),buildType:(id:${configId}),status:FAILURE,count:8&fields=testOccurrence(build(id))`,
+        `/app/rest/testOccurrences?locator=test:(name:${locatorValue(name)}),buildType:(id:${configId}),status:FAILURE,count:8&fields=testOccurrence(build(id))`,
       );
     } catch {
       continue;

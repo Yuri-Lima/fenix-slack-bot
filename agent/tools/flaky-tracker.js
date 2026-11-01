@@ -9,7 +9,7 @@ import {
   searchTests,
 } from '../../utils/flaky-store.js';
 import { shortTestName, textResult } from '../../utils/helpers.js';
-import { EXAMPLE_CONFIG, KEY_CONFIGS_HINT, tcApi } from './teamcity.js';
+import { EXAMPLE_CONFIG, KEY_CONFIGS_HINT, locatorValue, tcApi } from './teamcity.js';
 
 /**
  * Check a test's recent pass/fail history for a build config.
@@ -29,7 +29,7 @@ export async function getTestHistory(testName, configId, count = 10) {
 
   try {
     const data = await tcApi(
-      `/app/rest/testOccurrences?locator=test:(name:${encodeURIComponent(testName)}),buildType:(id:${configId}),count:${count}&fields=testOccurrence(status)`,
+      `/app/rest/testOccurrences?locator=test:(name:${locatorValue(testName)}),buildType:(id:${configId}),count:${count}&fields=testOccurrence(status)`,
     );
     const runs = data.testOccurrence || [];
     const failures = runs.filter((r) => r.status === 'FAILURE').length;
