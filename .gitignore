@@ -1,0 +1,29 @@
+# Claude Code
+.claude/*.local.json
+
+# Environment
+.env*
+!.env.sample
+!.env.deploy.sample
+
+# Logs
+logs/
+
+# macOS
+.DS_Store
+
+# Node.js
+node_modules/
+
+# OAuth
+data/
+
+# Deployment-specific config (see fenix.config.example.json, prompts/context.example.md)
+/fenix.config.json
+prompts/*.local.md
+
+# Internal notes and draft artwork
+REVIEW-*.md
+/*.webp
+/*.jpg
+/yuri-bot-icon*.png

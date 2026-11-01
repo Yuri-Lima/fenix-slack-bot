@@ -1,0 +1,36 @@
+{
+  "name": "fenix-slack-bot",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "check": "npx tsc --checkJs --noEmit --skipLibCheck --esModuleInterop --target esnext --module nodenext --moduleResolution nodenext app.js",
+    "start": "node app.js",
+    "lint": "npx @biomejs/biome check .",
+    "lint:fix": "npx @biomejs/biome check --write .",
+    "test": "FENIX_CONFIG=tests/fixtures/fenix.config.json node --test",
+    "vps:status": "scripts/vps.sh status",
+    "vps:restart": "scripts/vps.sh restart",
+    "vps:stop": "scripts/vps.sh stop",
+    "vps:logs": "scripts/vps.sh logs",
+    "vps:logs:follow": "scripts/vps.sh logs:follow",
+    "vps:deploy": "scripts/vps.sh deploy",
+    "svc:status": "systemctl status fenix-bot",
+    "svc:restart": "systemctl restart fenix-bot && sleep 2 && systemctl status fenix-bot",
+    "svc:stop": "systemctl stop fenix-bot && echo stopped",
+    "svc:logs": "journalctl -u fenix-bot --no-pager -n 50",
+    "svc:logs:follow": "journalctl -u fenix-bot -f"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.296",
+    "@slack/bolt": "^5.1.0",
+    "dotenv": "~18.0.7",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@slack/cli-hooks": "^2.0.0",
+    "typescript": "^7.0.2"
+  },
+  "description": "Fenix: an AI DevOps assistant for Slack, built on Bolt for JavaScript and the Claude Agent SDK."
+}

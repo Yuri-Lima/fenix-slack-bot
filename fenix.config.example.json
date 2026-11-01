@@ -1,0 +1,16 @@
+{
+  "teamName": "the Acme platform team",
+  "ownerIds": ["U0123456789"],
+  "ownerName": "Jane",
+  "adminDmChannel": "D0123456789",
+  "teamcity": {
+    "url": "https://teamcity.example.com",
+    "botId": "B0123456789",
+    "keyConfigs": [
+      { "id": "Main_E2eFrontEnd", "description": "Frontend Cypress e2e tests" },
+      { "id": "Main_E2eBackEnd", "description": "Backend Jest e2e tests" }
+    ]
+  },
+  "gitlab": { "url": "https://gitlab.example.com", "project": "acme/platform" },
+  "youtrack": { "url": "https://acme.youtrack.cloud", "project": "DEV" }
+}

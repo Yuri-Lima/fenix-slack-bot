@@ -1,0 +1,107 @@
+{
+  "display_information": {
+    "name": "Fenix",
+    "description": "AI-powered DevOps assistant for engineering teams",
+    "background_color": "#0F1923",
+    "long_description": "Fenix is an AI DevOps assistant for engineering teams. It monitors CI/CD pipelines, reports build failures, tracks flaky tests, and delivers real-time notifications to keep the team in the loop. Built to cut through the noise and surface what matters so engineers can focus on shipping."
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "agent_view": {
+      "agent_description": "Hey, I'm Fenix, your DevOps assistant. I can help with CI builds, test reports, and team notifications."
+    },
+    "bot_user": {
+      "display_name": "Fenix",
+      "always_online": true
+    },
+    "shortcuts": [
+      {
+        "name": "Create YouTrack Ticket",
+        "type": "message",
+        "callback_id": "create_youtrack_ticket",
+        "description": "Create a YouTrack ticket from this message"
+      }
+    ]
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://ngrok-free.app/slack/oauth_redirect"
+    ],
+    "scopes": {
+      "bot": [
+        "channels:read",
+        "app_mentions:read",
+        "assistant:write",
+        "channels:history",
+        "chat:write",
+        "groups:history",
+        "im:history",
+        "im:read",
+        "im:write",
+        "reactions:read",
+        "reactions:write",
+        "users:read",
+        "emoji:read",
+        "files:read",
+        "groups:read",
+        "incoming-webhook",
+        "links:read",
+        "links:write",
+        "mcp:connect",
+        "pins:write",
+        "reminders:write",
+        "team:read",
+        "triggers:read",
+        "triggers:write",
+        "channels:join",
+        "chat:write.public",
+        "chat:write.customize",
+        "commands"
+      ],
+      "user": [
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "mpim:history",
+        "users:read",
+        "search:read.public",
+        "search:read.private",
+        "search:read.mpim",
+        "search:read.im",
+        "search:read.files",
+        "search:read.users",
+        "chat:write",
+        "canvases:read",
+        "canvases:write",
+        "users:read.email"
+      ]
+    }
+  },
+  "settings": {
+    "socket_mode_enabled": true,
+    "org_deploy_enabled": true,
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://ngrok-free.app/slack/events"
+    },
+    "event_subscriptions": {
+      "request_url": "https://ngrok-free.app/slack/events",
+      "bot_events": [
+        "app_home_opened",
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im"
+      ]
+    },
+    "token_rotation_enabled": false,
+    "app_level_token_rotation_enabled": false,
+    "is_mcp_enabled": true
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "teamName": "the test team",
+  "ownerIds": ["U0OWNER"],
+  "ownerName": "Owner",
+  "adminDmChannel": "D0ADMIN",
+  "teamcity": { "url": "https://teamcity.example.com", "botId": "B0TEAMCITY", "keyConfigs": [] },
+  "gitlab": { "url": "https://gitlab.example.com", "project": "acme/platform" },
+  "youtrack": { "url": "https://acme.youtrack.cloud", "project": "DEV" },
+  "contextFile": "tests/fixtures/no-context.md"
+}
