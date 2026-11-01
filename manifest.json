@@ -47,6 +47,7 @@
         "users:read",
         "emoji:read",
         "files:read",
+        "files:write",
         "groups:read",
         "incoming-webhook",
         "links:read",
