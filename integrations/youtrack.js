@@ -2,7 +2,7 @@ import { baseUrl, config } from '../config.js';
 import { createTokenReader } from '../utils/tokens.js';
 import { httpRequest, requireConfigured } from './http.js';
 
-export const YT_BASE = baseUrl(config.youtrack.url);
+const YT_BASE = baseUrl(config.youtrack.url);
 export const YT_PROJECT = config.youtrack.project;
 
 /** Issue types offered when creating tickets; the first is the default. */

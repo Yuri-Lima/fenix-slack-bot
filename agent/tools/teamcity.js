@@ -78,7 +78,7 @@ export const getBuildDetailsTool = tool(
       );
 
       const duration = b.statistics?.property?.find((p) => p.name === 'BuildDuration');
-      const durationMin = duration ? (Number.parseInt(duration.value) / 60000).toFixed(1) : '?';
+      const durationMin = duration ? (Number.parseInt(duration.value, 10) / 60000).toFixed(1) : '?';
       const emoji = b.status === 'SUCCESS' ? ':large_green_circle:' : ':red_circle:';
 
       const text =
@@ -155,7 +155,7 @@ export const getBuildChangesTool = tool(
         (c) => `**${commitAuthor(c)}** \`${shortSha(c)}\` — ${commitTitle(c)} (${changedFiles(c).length} files)`,
       );
 
-      return textResult(`**${changes.length} change(s):**\n\n` + lines.join('\n'));
+      return textResult(`**${changes.length} change(s):**\n\n${lines.join('\n')}`);
     } catch (e) {
       return textResult(`TeamCity error: ${e.message}`, true);
     }

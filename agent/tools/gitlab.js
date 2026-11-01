@@ -1,6 +1,6 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { glProjectApi, glRawFile, isBlockedPath } from '../../integrations/gitlab.js';
+import { DEFAULT_BRANCH, glProjectApi, glRawFile, isBlockedPath } from '../../integrations/gitlab.js';
 import { andMore, textResult } from '../../utils/helpers.js';
 
 const MAX_FILE_CHARS = 25_000;
@@ -13,7 +13,7 @@ export const searchCodeTool = tool(
     'Returns matching file paths and code snippets with line numbers.',
   {
     query: z.string().describe('Search query (e.g. "OrderService", "createInvoice", "price calculation")'),
-    ref: z.string().optional().describe('Branch or tag to search (default: main)'),
+    ref: z.string().optional().describe(`Branch or tag to search (default: ${DEFAULT_BRANCH})`),
   },
   async ({ query, ref }) => {
     try {
@@ -21,7 +21,7 @@ export const searchCodeTool = tool(
       const found = await glProjectApi('/search', {
         scope: 'blobs',
         search: query,
-        ref: ref || 'main',
+        ref: ref || DEFAULT_BRANCH,
         per_page: 15,
       });
       // Snippets are file content, so restricted files are dropped entirely
@@ -33,7 +33,7 @@ export const searchCodeTool = tool(
 
       const lines = results.map((r) => {
         const snippet = (r.data || '').trim();
-        const truncated = snippet.length > 300 ? snippet.slice(0, 300) + '...' : snippet;
+        const truncated = snippet.length > 300 ? `${snippet.slice(0, 300)}...` : snippet;
         return `**${r.filename}** (line ${r.startline})\n\`${r.path}\`\n\`\`\`\n${truncated}\n\`\`\``;
       });
 
@@ -51,14 +51,14 @@ export const readFileTool = tool(
     'Large files are truncated at 25k characters.',
   {
     path: z.string().describe('File path relative to repo root (e.g. "packages/core/src/models/order.entity.ts")'),
-    ref: z.string().optional().describe('Branch or tag (default: main)'),
+    ref: z.string().optional().describe(`Branch or tag (default: ${DEFAULT_BRANCH})`),
     start_line: z.number().optional().describe('Start reading from this line (1-based, for focused reads)'),
     end_line: z.number().optional().describe('Stop reading at this line (inclusive)'),
   },
   async ({ path, ref, start_line, end_line }) => {
     try {
       if (isBlockedPath(path)) return textResult(RESTRICTED, true);
-      let content = await glRawFile(path, ref || 'main');
+      let content = await glRawFile(path, ref || DEFAULT_BRANCH);
 
       if (start_line || end_line) {
         const lines = content.split('\n');
@@ -91,7 +91,7 @@ export const listFilesTool = tool(
     'Use this to browse the project structure or find files in a specific module.',
   {
     path: z.string().optional().describe('Directory path (default: repo root). Example: "packages/core/src/models"'),
-    ref: z.string().optional().describe('Branch or tag (default: main)'),
+    ref: z.string().optional().describe(`Branch or tag (default: ${DEFAULT_BRANCH})`),
     recursive: z
       .boolean()
       .optional()
@@ -103,7 +103,7 @@ export const listFilesTool = tool(
       /** @type {Array<{ name: string, path: string, type: string }>} */
       const listed = await glProjectApi('/repository/tree', {
         path: path || '',
-        ref: ref || 'main',
+        ref: ref || DEFAULT_BRANCH,
         recursive: recursive ? 'true' : 'false',
         per_page: 100,
       });
@@ -115,8 +115,8 @@ export const listFilesTool = tool(
       const files = items.filter((i) => i.type === 'blob').map((i) => `  ${i.name}`);
 
       const parts = [`**${path || '/'}** (${items.length} items)\n`];
-      if (dirs.length) parts.push('Directories:\n' + dirs.join('\n'));
-      if (files.length) parts.push('Files:\n' + files.join('\n'));
+      if (dirs.length) parts.push(`Directories:\n${dirs.join('\n')}`);
+      if (files.length) parts.push(`Files:\n${files.join('\n')}`);
 
       const more = andMore(listed.length, 100, '');
       if (more) parts.push(more);
@@ -135,7 +135,7 @@ export const recentCommitsTool = tool(
     'Use this to understand recent changes or find who modified something.',
   {
     path: z.string().optional().describe('Filter commits to a specific file or directory path'),
-    ref: z.string().optional().describe('Branch name (default: main)'),
+    ref: z.string().optional().describe(`Branch name (default: ${DEFAULT_BRANCH})`),
     count: z.number().min(1).max(25).optional().describe('Number of commits to return (default: 10, max: 25)'),
   },
   async ({ path, ref, count }) => {
@@ -143,7 +143,7 @@ export const recentCommitsTool = tool(
       if (path && isBlockedPath(path)) return textResult(RESTRICTED, true);
       /** @type {Record<string, string | number>} */
       const params = {
-        ref_name: ref || 'main',
+        ref_name: ref || DEFAULT_BRANCH,
         per_page: count || 10,
       };
       if (path) params.path = path;
@@ -154,7 +154,7 @@ export const recentCommitsTool = tool(
 
       const lines = commits.map((c) => {
         const date = new Date(c.created_at).toISOString().slice(0, 10);
-        const msg = c.title.length > 100 ? c.title.slice(0, 100) + '...' : c.title;
+        const msg = c.title.length > 100 ? `${c.title.slice(0, 100)}...` : c.title;
         return `- \`${c.short_id}\` ${date} **${c.author_name}**: ${msg}`;
       });
 

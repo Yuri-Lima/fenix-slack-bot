@@ -6,6 +6,13 @@ const DATA_DIR = resolvePath(config.dataDir);
 const FEEDBACK_FILE = join(DATA_DIR, 'feedback.json');
 const MAX_ENTRIES = 500;
 
+/** Feedback categories, used by the agent's feedback tools and their schemas. */
+export const FEEDBACK_CATEGORIES = /** @type {const} */ (['bug', 'feature', 'ux', 'accuracy', 'praise', 'other']);
+/** Feedback sentiments. */
+export const FEEDBACK_SENTIMENTS = /** @type {const} */ (['positive', 'negative', 'neutral']);
+/** @typedef {(typeof FEEDBACK_CATEGORIES)[number]} FeedbackCategory */
+/** @typedef {(typeof FEEDBACK_SENTIMENTS)[number]} FeedbackSentiment */
+
 mkdirSync(DATA_DIR, { recursive: true });
 
 function load() {
@@ -27,8 +34,8 @@ function save(entries) {
  * @property {string} userName
  * @property {string} originalText
  * @property {string} summary
- * @property {'bug' | 'feature' | 'ux' | 'accuracy' | 'praise' | 'other'} category
- * @property {'positive' | 'negative' | 'neutral'} sentiment
+ * @property {FeedbackCategory} category
+ * @property {FeedbackSentiment} sentiment
  * @property {string} actionable
  * @property {string} ts
  * @property {'button' | 'conversation'} source

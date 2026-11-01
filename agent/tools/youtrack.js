@@ -46,7 +46,7 @@ export const searchIssuesTool = tool(
         return `**${issue.idReadable}** ${issue.summary}${resolved}\n  _${type} | ${state} | ${assignee}_`;
       });
 
-      return textResult(`**${issues.length} issue(s):**\n\n` + lines.join('\n\n'));
+      return textResult(`**${issues.length} issue(s):**\n\n${lines.join('\n\n')}`);
     } catch (e) {
       return textResult(`YouTrack error: ${e.message}`, true);
     }
@@ -211,7 +211,7 @@ export const myIssuesTool = tool(
         return `\`${issue.idReadable}\` ${issue.summary} — _${type} | ${state}_`;
       });
 
-      return textResult(`**${issues.length} open issue(s):**\n\n` + lines.join('\n'));
+      return textResult(`**${issues.length} open issue(s):**\n\n${lines.join('\n')}`);
     } catch (e) {
       return textResult(`YouTrack error: ${e.message}`, true);
     }

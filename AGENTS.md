@@ -1,6 +1,6 @@
 # AGENTS.md - Fenix
 
-Fenix is a Slack DevOps assistant built with Bolt for JavaScript and the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview) (`@anthropic-ai/claude-agent-sdk`). The agent module and some identifiers still use the original template name, Casey (`agent/casey.js`, `runCaseyAgent`).
+Fenix is a Slack DevOps assistant built with Bolt for JavaScript and the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview) (`@anthropic-ai/claude-agent-sdk`).
 
 See [README.md](README.md) for features, tools, and deployment.
 
@@ -69,7 +69,7 @@ npm test             # Run all tests
 
 ### Agent Layer
 
-The agent is defined in `agent/casey.js` using the Claude Agent SDK:
+The agent is defined in `agent/fenix.js` using the Claude Agent SDK:
 
 - `query({ prompt, options })` returns an async generator of messages
 - Tools are defined with `tool()` from the SDK using Zod v4 schemas
@@ -82,11 +82,11 @@ The agent is defined in `agent/casey.js` using the Claude Agent SDK:
 
 `thread-context/store.js` exports a `SessionStore` that stores **session IDs only** (not full message history). The Claude Agent SDK manages conversation history server-side. The store passes `{ resume: sessionId }` on subsequent turns to continue a conversation.
 
-The store uses a `Map` keyed by `${channelId}:${threadTs}` with TTL-based cleanup (1 hour) and a max entry limit (1000).
+The store uses a `Map` keyed by `${channelId}:${threadTs}` with TTL-based cleanup (24 hours) and a max entry limit (1000). Build keys with `threadKey()` from `thread-context/`.
 
 ### Dependency Injection
 
-`runCaseyAgent(text, sessionId, deps)` accepts an optional `deps` object with `{ client, channelId, threadTs, messageTs, userId, userName }`. Tools that need Slack API access (emoji reactions, mark resolved) are created as closures inside `runCaseyAgent()` that capture the `deps` parameter. Static tools (knowledge base, tickets, etc.) remain as module-level exports in `agent/tools/`.
+`runFenixAgent(text, sessionId, deps)` takes a required `deps` object with `{ client, channelId, threadTs, messageTs, userId, userName }`. Tools that need Slack API access (emoji reactions, mark resolved) are created as closures inside `runCaseyAgent()` that capture the `deps` parameter. Static tools (knowledge base, tickets, etc.) remain as module-level exports in `agent/tools/`.
 
 ### Integrations
 

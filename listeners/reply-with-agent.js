@@ -1,4 +1,4 @@
-import { runCaseyAgent } from '../agent/index.js';
+import { runFenixAgent } from '../agent/index.js';
 import { sessionStore } from '../thread-context/index.js';
 import { buildFeedbackBlocks } from './views/feedback-builder.js';
 
@@ -41,7 +41,7 @@ export async function replyWithAgent({
   await setStatus({ status: 'Thinking…', loading_messages: LOADING_MESSAGES });
 
   const deps = { client, channelId, threadTs, messageTs, userId, userName };
-  const { responseText, sessionId: newSessionId } = await runCaseyAgent(text, existingSessionId ?? undefined, deps);
+  const { responseText, sessionId: newSessionId } = await runFenixAgent(text, existingSessionId ?? undefined, deps);
 
   if (newSessionId) {
     sessionStore.setSession(channelId, threadTs, newSessionId);

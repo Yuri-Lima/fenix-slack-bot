@@ -5,7 +5,7 @@ import { replyWithAgent } from '../reply-with-agent.js';
 import { handleDeleteCommand, isDeleteCommand } from './delete-thread.js';
 
 /**
- * Handle app_mention events and run the Casey agent.
+ * Handle app_mention events and run the Fenix agent.
  * @param {import('@slack/bolt').AllMiddlewareArgs & import('@slack/bolt').SlackEventMiddlewareArgs<'app_mention'>} args
  * @returns {Promise<void>}
  */
@@ -40,7 +40,7 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
 
     if (!cleanedText) {
       await say({
-        text: "Hey there! How can I help you? Describe your IT issue and I'll do my best to assist.",
+        text: 'Hey! Ask me about a build, a flaky test, a YouTrack ticket, or the codebase.',
         thread_ts: threadTs,
       });
       return;

@@ -1,9 +1,9 @@
 import { buildAppHomeView } from '../views/app-home-builder.js';
 
 const SUGGESTED_PROMPTS = [
-  { title: 'Reset Password', message: 'I need to reset my password' },
-  { title: 'Request Access', message: 'I need access to a system or tool' },
-  { title: 'Network Issues', message: "I'm having network connectivity issues" },
+  { title: 'Latest failed build', message: 'What broke in the latest failed build, and whose change caused it?' },
+  { title: 'Flaky tests', message: 'Which tests are flaky right now?' },
+  { title: 'My open tickets', message: 'What YouTrack issues are assigned to me?' },
 ];
 
 /**
@@ -22,7 +22,7 @@ export async function handleAppHomeOpened({ client, event, context, logger }) {
         // no thread_ts is required. Cast until @slack/bolt's types catch up.
         /** @type {import('@slack/web-api').AssistantThreadsSetSuggestedPromptsArguments} */ ({
           channel_id: event.channel,
-          title: 'How can I help you today?',
+          title: 'What can I look into for you?',
           prompts: SUGGESTED_PROMPTS,
         }),
       );
@@ -31,7 +31,7 @@ export async function handleAppHomeOpened({ client, event, context, logger }) {
     }
 
     const userId = /** @type {string} */ (context.userId);
-    const view = buildAppHomeView(null, false, context.botUserId);
+    const view = buildAppHomeView(context.botUserId);
     await client.views.publish({ user_id: userId, view });
   } catch (e) {
     logger.error(`Failed to handle app_home_opened: ${e}`);

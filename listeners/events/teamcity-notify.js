@@ -20,7 +20,7 @@ const BUILD_URL_RE = TC_BASE
   ? new RegExp(escapeRegExp(buildUrl('CONFIG', 'BUILD')).replace('CONFIG', '([^/|>]+)').replace('BUILD', '(\\d+)'))
   : null;
 
-export function parseBuildUrl(text) {
+function parseBuildUrl(text) {
   const match = BUILD_URL_RE && text.match(BUILD_URL_RE);
   if (!match) return null;
   return { configId: match[1], buildId: Number.parseInt(match[2], 10) };
@@ -417,6 +417,7 @@ export function extractBuildLogErrors(logText) {
     .split('\n')
     .map((l) =>
       l
+        // biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI color codes, which start with ESC (\x1b)
         .replace(/\x1b\[[0-9;]*m/g, '')
         .replace(/\[[\d;]*m/g, '')
         .replace(/\r$/, '')
@@ -643,7 +644,7 @@ export function formatAnalysis({
 
   const netProp = b.statistics?.property?.find((p) => p.name === 'BuildDurationNetTime');
   const fallbackProp = b.statistics?.property?.find((p) => p.name === 'BuildDuration');
-  const durationMs = Number.parseInt((netProp || fallbackProp)?.value || '0');
+  const durationMs = Number.parseInt((netProp || fallbackProp)?.value || '0', 10);
   const totalMin = Math.round(durationMs / 60000);
   const durationMin = totalMin >= 60 ? `${Math.floor(totalMin / 60)}h ${totalMin % 60}m` : `${totalMin} min`;
 

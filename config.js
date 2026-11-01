@@ -17,7 +17,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {string} ownerName - Name shown in access-denied and error messages
  * @property {string | null} adminDmChannel - DM channel where messages from non-owners are forwarded
  * @property {{ url: string | null, botId: string | null, keyConfigs: BuildConfigHint[] }} teamcity
- * @property {{ url: string | null, project: string | null }} gitlab
+ * @property {{ url: string | null, project: string | null, defaultBranch: string }} gitlab
  * @property {{ url: string | null, project: string }} youtrack
  * @property {string} contextFile - Markdown appended to the system prompt (team-specific knowledge)
  * @property {string} dataDir - Directory for persisted state (feedback, failure log), relative to the project root
@@ -30,7 +30,7 @@ const DEFAULTS = {
   ownerName: 'the bot owner',
   adminDmChannel: null,
   teamcity: { url: null, botId: null, keyConfigs: [] },
-  gitlab: { url: null, project: null },
+  gitlab: { url: null, project: null, defaultBranch: 'main' },
   youtrack: { url: null, project: 'DEV' },
   contextFile: 'prompts/context.local.md',
   dataDir: 'data',

@@ -12,19 +12,6 @@ function isGenericMessageEvent(event) {
   return !('subtype' in event && event.subtype !== undefined);
 }
 
-/**
- * @typedef {{ event_type: 'issue_submission', event_payload: { user_id: string } }} IssueSubmissionMetadata
- */
-
-/**
- * @param {import('@slack/types').GenericMessageEvent} event
- * @returns {IssueSubmissionMetadata | null}
- */
-function getIssueMetadata(event) {
-  const metadata = /** @type {any} */ (event).metadata;
-  return metadata?.event_type === 'issue_submission' ? metadata : null;
-}
-
 async function forwardDmToOwner(client, event, logger) {
   const adminChannel = config.adminDmChannel;
   if (!adminChannel || event.channel === adminChannel) return;
@@ -41,7 +28,7 @@ async function forwardDmToOwner(client, event, logger) {
 }
 
 /**
- * Handle messages sent to Casey via DM. Channel messages are handled only
+ * Handle messages sent to Fenix via DM. Channel messages are handled only
  * when they @mention the bot, by the app_mention handler.
  * @param {import('@slack/bolt').AllMiddlewareArgs & import('@slack/bolt').SlackEventMiddlewareArgs<'message'>} args
  * @returns {Promise<void>}
@@ -50,29 +37,25 @@ export async function handleMessage({ client, context, event, logger, say, saySt
   // Skip message subtypes (edits, deletes, etc.)
   if (!isGenericMessageEvent(event)) return;
 
-  // Issue submissions are posted by the bot with metadata so the message
-  // handler can run the agent on behalf of the original user.
-  const issueMetadata = getIssueMetadata(event);
-
-  // Skip bot messages that are not issue submissions.
-  if (event.bot_id && !issueMetadata) return;
+  // Skip bot messages, including Fenix's own
+  if (event.bot_id) return;
 
   // Skip @mentions in channels -- app_mention handler covers those
   if (context.botUserId && event.text?.includes(`<@${context.botUserId}>`)) return;
 
-  // Only DMs are handled here (issue submissions are posted as DMs too). In
+  // Only DMs are handled here. In
   // channels and channel threads the bot replies only when @mentioned, even in
   // threads it is already part of -- the app_mention handler covers those and
   // resumes the thread's session.
   const isDm = event.channel_type === 'im';
   if (!isDm) return;
 
-  const userId = issueMetadata?.event_payload?.user_id || event.user;
+  const userId = event.user;
   const text = event.text || '';
   const threadTs = event.thread_ts || event.ts;
 
   // Forward DMs from non-whitelisted users to the admin DM channel
-  if (!issueMetadata && !isWhitelisted(event.user)) {
+  if (!isWhitelisted(userId)) {
     forwardDmToOwner(client, event, logger);
   }
 

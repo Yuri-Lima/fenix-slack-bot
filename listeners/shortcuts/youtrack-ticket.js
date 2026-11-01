@@ -214,17 +214,17 @@ export async function handleYouTrackShortcut({ ack, shortcut, client, logger }) 
       }
       fullText = lines.join('\n\n');
 
-      const previewLines = lines.map((l) => (l.length > 120 ? l.slice(0, 120) + '...' : l));
+      const previewLines = lines.map((l) => (l.length > 120 ? `${l.slice(0, 120)}...` : l));
       previewText = previewLines.join('\n');
       if (previewText.length > 2800) {
-        previewText = previewText.slice(0, 2800) + '\n...';
+        previewText = `${previewText.slice(0, 2800)}\n...`;
       }
     } else {
       fullText = messageText;
       if (allFiles.length) {
         fullText += `\n  [attachments: ${allFiles.map((f) => f.name).join(', ')}]`;
       }
-      previewText = fullText.length > 2800 ? fullText.slice(0, 2800) + '...' : fullText;
+      previewText = fullText.length > 2800 ? `${fullText.slice(0, 2800)}...` : fullText;
     }
 
     const msgCount = contextMessages.length > 1 ? ` (${contextMessages.length} messages)` : '';

@@ -22,7 +22,7 @@ mock.module('@anthropic-ai/claude-agent-sdk', {
   },
 });
 
-const { AGENT_TIMEOUT_MESSAGE, runFenixAgent } = await import('../../agent/casey.js');
+const { AGENT_TIMEOUT_MESSAGE, THREAD_BUSY_MESSAGE, runFenixAgent } = await import('../../agent/fenix.js');
 
 const deps = (thread) => ({
   client: {},
@@ -58,6 +58,23 @@ describe('runFenixAgent timeout', () => {
       assert.strictEqual(seenOptions.length, 1);
       mock.timers.tick(120_000);
       assert.strictEqual((await again).responseText, AGENT_TIMEOUT_MESSAGE);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+});
+
+describe('runFenixAgent busy thread', () => {
+  it('answers a second message in a busy thread with a notice instead of an empty reply', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const first = runFenixAgent('first', undefined, deps('9.0'));
+      await new Promise((r) => setImmediate(r));
+      const second = await runFenixAgent('second', undefined, deps('9.0'));
+      assert.deepStrictEqual(second, { responseText: THREAD_BUSY_MESSAGE, sessionId: null });
+
+      mock.timers.tick(120_000);
+      await first;
     } finally {
       mock.timers.reset();
     }

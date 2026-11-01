@@ -52,8 +52,8 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | **Direct message** | Just write | Fenix answers in a thread and keeps context across follow-ups. |
 | **Channels and threads** | `@Fenix <question>` | Fenix replies **only when mentioned**, including inside threads it already joined. A mention resumes that thread's conversation. |
 | **TeamCity notifications** | Nothing; automatic | Failed-build messages from the TeamCity app get an analysis reply, no mention needed. |
-| **App Home** | Pick a category | A modal collects the details and Fenix starts a DM thread with a resolution. |
-| **Assistant panel** | *Add Agent → Fenix* | Suggested prompts to get started. |
+| **App Home** | Open the Home tab | A summary of what Fenix can do and how to reach it. |
+| **Assistant panel** | *Add Agent → Fenix* | Suggested prompts for builds, flaky tests, and tickets. |
 | **Message shortcut** | ⋯ → *Create YouTrack Ticket* | Opens a ticket form pre-filled from the message. |
 
 ### Commands
@@ -125,12 +125,6 @@ Fenix's agent can only call the tools below. It runs with Claude Code's built-in
 | `save_user_feedback` | Store structured feedback (summary, category, sentiment, actionable) after the user confirms it. |
 | `list_user_feedback` | *Owner only.* Review stored feedback with filters. |
 | `feedback_stats` | *Owner only.* Aggregate feedback by category and sentiment. |
-
-### IT helpdesk (simulated)
-
-`search_knowledge_base`, `create_support_ticket`, `trigger_password_reset`, `check_system_status`, and
-`lookup_user_permissions` are inherited from the original IT-support template. They return **simulated data** and
-are meant as integration points for real systems.
 
 ## Automatic build-failure analysis
 
@@ -237,6 +231,7 @@ cp fenix.config.example.json fenix.config.json
 | `teamcity.url` / `teamcity.botId` | TeamCity base URL and the Slack bot ID of the TeamCity app, whose failure posts trigger the analysis. |
 | `teamcity.keyConfigs` | Build configurations the agent should know by name: `[{ "id", "description" }]`. |
 | `gitlab.url` / `gitlab.project` | GitLab base URL and project path (`group/repo`) for the codebase tools. |
+| `gitlab.defaultBranch` | Branch the codebase tools use when none is given (default `main`). |
 | `youtrack.url` / `youtrack.project` | YouTrack base URL and default project key. |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |
 | `dataDir` | Directory for persisted state: feedback and the failure log (default `data`). |
@@ -250,10 +245,15 @@ conventions, goes here. See [`prompts/context.example.md`](prompts/context.examp
 
 ### Slack app
 
-[`manifest.json`](manifest.json) defines the app: Socket Mode, the App Home and Messages tabs, the agent view, the
-*Create YouTrack Ticket* shortcut, and the bot events `app_mention`, `app_home_opened`, `message.channels`,
-`message.groups`, and `message.im`. Create the app from it at [api.slack.com/apps](https://api.slack.com/apps)
-(*From a manifest*), install it to your workspace, and invite Fenix to the channels where TeamCity posts.
+[`manifest.json`](manifest.json) is the version-controlled definition of the app: Socket Mode, the App Home and
+Messages tabs, the agent view, the *Create YouTrack Ticket* shortcut, the bot scopes, and the bot events
+`app_mention`, `app_home_opened`, `message.channels`, `message.groups`, and `message.im`. Create the app from it at
+[api.slack.com/apps](https://api.slack.com/apps) (*From a manifest*), install it to your workspace, and invite Fenix
+to the channels where TeamCity posts.
+
+The Slack CLI project is set to a **remote** manifest (`.slack/config.json`), so `slack run` never overwrites the
+app. To apply a change, edit `manifest.json`, paste it into *App Manifest* on api.slack.com, and reinstall if the
+scopes changed.
 
 ## Getting started
 
@@ -326,8 +326,8 @@ WantedBy=multi-user.target
 ├── config.js                    # Loads fenix.config.json
 ├── integrations/                # TeamCity, YouTrack, GitLab API clients and TeamCity test history
 ├── agent/
-│   ├── casey.js                 # Agent runner, system prompt, Slack-bound tools
-│   └── tools/                   # TeamCity, flaky tracker, YouTrack, GitLab, helpdesk tools
+│   ├── fenix.js                 # Agent runner, system prompt, Slack-bound tools
+│   └── tools/                   # TeamCity, flaky tracker, YouTrack, and GitLab tools
 ├── listeners/
 │   ├── events/                  # DMs, mentions, @Fenix delete, TeamCity failure analysis
 │   ├── actions/                 # Feedback and issue buttons

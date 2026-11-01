@@ -4,6 +4,8 @@ import { httpRequest, requireConfigured } from './http.js';
 
 const GL_BASE = baseUrl(config.gitlab.url);
 const PROJECT_PATH = config.gitlab.project ? encodeURIComponent(config.gitlab.project) : null;
+/** Branch used when a tool call names none. */
+export const DEFAULT_BRANCH = config.gitlab.defaultBranch;
 
 const getToken = createTokenReader('GITLAB_TOKEN', '.gitlab_token');
 

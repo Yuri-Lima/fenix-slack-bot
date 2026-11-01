@@ -1,4 +1,3 @@
-import { handleIssueSubmission } from './issue-modal.js';
 import { handleYouTrackTicketModal } from './youtrack-ticket-modal.js';
 
 /**
@@ -7,6 +6,5 @@ import { handleYouTrackTicketModal } from './youtrack-ticket-modal.js';
  * @returns {void}
  */
 export function register(app) {
-  app.view('issue_submission', handleIssueSubmission);
   app.view('youtrack_ticket_modal', handleYouTrackTicketModal);
 }

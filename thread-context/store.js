@@ -5,6 +5,16 @@
  */
 
 /**
+ * Key identifying a Slack thread: one agent session and one in-flight run per thread.
+ * @param {string} channelId
+ * @param {string} threadTs
+ * @returns {string}
+ */
+export function threadKey(channelId, threadTs) {
+  return `${channelId}:${threadTs}`;
+}
+
+/**
  * In-memory session ID store with TTL-based cleanup.
  */
 export class SessionStore {
@@ -27,7 +37,7 @@ export class SessionStore {
    * @returns {string | null}
    */
   getSession(channelId, threadTs) {
-    const key = `${channelId}:${threadTs}`;
+    const key = threadKey(channelId, threadTs);
     const entry = this._store.get(key);
     if (!entry) return null;
     if (Date.now() - entry.timestamp > this._ttlSeconds * 1000) {
@@ -44,7 +54,7 @@ export class SessionStore {
    * @returns {void}
    */
   setSession(channelId, threadTs, sessionId) {
-    const key = `${channelId}:${threadTs}`;
+    const key = threadKey(channelId, threadTs);
     this._store.set(key, {
       sessionId,
       timestamp: Date.now(),
@@ -58,7 +68,7 @@ export class SessionStore {
    * @returns {void}
    */
   deleteSession(channelId, threadTs) {
-    this._store.delete(`${channelId}:${threadTs}`);
+    this._store.delete(threadKey(channelId, threadTs));
   }
 
   /**

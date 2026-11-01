@@ -1,1 +1,1 @@
-export { runFenixAgent as runCaseyAgent } from './casey.js';
+export { runFenixAgent } from './fenix.js';
