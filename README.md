@@ -165,7 +165,7 @@ How it gets there:
 ```mermaid
 flowchart LR
     subgraph Slack
-        U[People] -->|DM / @mention| B
+        U[People] -->|"DM / @mention"| B
         TC[TeamCity app] -->|failed build| B
         B[Bolt app<br/>Socket Mode]
     end
@@ -173,7 +173,7 @@ flowchart LR
     B --> L{Listeners}
     L -->|DMs, mentions| A[Fenix agent<br/>Claude Agent SDK]
     L -->|TeamCity failures| N[Failure analyser]
-    L -->|@Fenix delete| D[Thread cleanup]
+    L -->|"@Fenix delete"| D[Thread cleanup]
 
     A --> M[(In-process MCP server<br/>fenix-tools)]
     M --> T1[TeamCity API]
