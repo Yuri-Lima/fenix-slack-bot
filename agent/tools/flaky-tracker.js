@@ -1,45 +1,74 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import {
-  getFlakyTests,
-  getStoredHistory,
-  getStoreSummary,
-  getTestTimeline,
-  getWorseningTests,
-  searchTests,
-} from '../../utils/flaky-store.js';
-import { shortTestName, textResult } from '../../utils/helpers.js';
+import { getRecentFailures, searchTests } from '../../utils/flaky-store.js';
+import { andMore, shortTestName, textResult } from '../../utils/helpers.js';
 import { EXAMPLE_CONFIG, KEY_CONFIGS_HINT, locatorValue, tcApi } from './teamcity.js';
 
+// TeamCity is the single source of truth for pass/fail history. The local
+// flaky store only logs which tests failed (build notifications carry
+// failures only), so it is used to find candidate tests and to resolve
+// partial names -- never to compute fail rates.
+
+/** Fail rate from which a test counts as flaky. */
+export const FLAKY_MIN_RATE = 0.15;
+/** Fail rate from which a test counts as broken rather than flaky. */
+export const BROKEN_MIN_RATE = 0.9;
+/** Runs needed before a test is classified at all. */
+export const MIN_RUNS = 3;
+/** Fail-rate increase between two windows that counts as getting worse. */
+const WORSENING_DELTA = 0.1;
+/** Upper bound on runs fetched per test from TeamCity. */
+const MAX_HISTORY_RUNS = 60;
+/** Upper bound on candidate tests checked per tool call (each costs one TeamCity request). */
+const MAX_CANDIDATES = 20;
+
+/** @typedef {{ status: 'FAILURE' | 'SUCCESS', buildId: number | null, buildNumber: string, ts: number }} TestRun */
+
 /**
- * Check a test's recent pass/fail history for a build config.
+ * Parse a TeamCity timestamp such as `20261029T094450+0100`.
+ * @param {string | undefined} value
+ * @returns {number} epoch milliseconds, or 0 when missing/unparseable
+ */
+export function parseTcDate(value) {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})([+-]\d{2})(\d{2})$/.exec(value || '');
+  if (!m) return 0;
+  const [, y, mo, d, h, mi, s, tzh, tzm] = m;
+  const ts = Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${s}${tzh}:${tzm}`);
+  return Number.isNaN(ts) ? 0 : ts;
+}
+
+/**
+ * A test's recent pass/fail history for a build config, from TeamCity.
+ * Runs are newest first; muted/ignored occurrences are not counted.
  * @param {string} testName
  * @param {string} configId
  * @param {number} count
- * @returns {Promise<{passes: number, failures: number, total: number, rate: number}>}
+ * @returns {Promise<{passes: number, failures: number, total: number, rate: number, runs: TestRun[]}>}
+ *   rate is -1 when TeamCity could not be queried
  */
 export async function getTestHistory(testName, configId, count = 10) {
-  const stored = getStoredHistory(configId, testName);
-  if (stored && stored.total >= count) {
-    const recent = stored.runs.slice(-count);
-    const failures = recent.filter((r) => r.status === 'FAILURE').length;
-    const passes = recent.length - failures;
-    return { passes, failures, total: recent.length, rate: failures / recent.length };
-  }
-
   try {
     const data = await tcApi(
-      `/app/rest/testOccurrences?locator=test:(name:${locatorValue(testName)}),buildType:(id:${configId}),count:${count}&fields=testOccurrence(status)`,
+      `/app/rest/testOccurrences?locator=test:(name:${locatorValue(testName)}),buildType:(id:${configId}),count:${count}` +
+        '&fields=testOccurrence(status,build(id,number,finishDate))',
     );
-    const runs = data.testOccurrence || [];
+    /** @type {TestRun[]} */
+    /** @type {Array<{ status: string, build?: { id?: number, number?: string, finishDate?: string } }>} */
+    const occurrences = data.testOccurrence || [];
+    const runs = occurrences
+      .filter((o) => o.status === 'FAILURE' || o.status === 'SUCCESS')
+      .map((o) => ({
+        status: /** @type {'FAILURE' | 'SUCCESS'} */ (o.status),
+        buildId: o.build?.id ?? null,
+        buildNumber: o.build?.number || '',
+        ts: parseTcDate(o.build?.finishDate),
+      }));
     const failures = runs.filter((r) => r.status === 'FAILURE').length;
-    const passes = runs.filter((r) => r.status === 'SUCCESS').length;
-    const total = runs.length;
-    const rate = total > 0 ? failures / total : 0;
-    return { passes, failures, total, rate };
+    const passes = runs.length - failures;
+    return { passes, failures, total: runs.length, rate: runs.length > 0 ? failures / runs.length : 0, runs };
   } catch (err) {
     console.error(`getTestHistory failed for "${testName}": ${err}`);
-    return { passes: -1, failures: -1, total: 0, rate: -1 };
+    return { passes: -1, failures: -1, total: 0, rate: -1, runs: [] };
   }
 }
 
@@ -51,225 +80,215 @@ export async function getTestHistory(testName, configId, count = 10) {
  */
 export function classifyTest(rate, total) {
   if (rate < 0) return 'unknown';
-  if (total < 3) return 'unknown';
-  if (rate >= 0.9) return 'broken';
-  if (rate >= 0.15) return 'flaky';
+  if (total < MIN_RUNS) return 'unknown';
+  if (rate >= BROKEN_MIN_RATE) return 'broken';
+  if (rate >= FLAKY_MIN_RATE) return 'flaky';
   return 'rare';
 }
 
-function trendEmoji(trend) {
-  if (trend === 'worsening') return ':chart_with_upwards_trend:';
-  if (trend === 'improving') return ':chart_with_downwards_trend:';
-  return ':left_right_arrow:';
+/**
+ * Fail rates in the last `days` vs the `days` before that.
+ * @param {TestRun[]} runs
+ * @param {number} days
+ * @param {number} [now]
+ * @returns {{ recentRate: number, olderRate: number, delta: number, recentRuns: number, olderRuns: number }}
+ */
+export function compareWindows(runs, days, now = Date.now()) {
+  const cutoff = now - days * 86_400_000;
+  const olderCutoff = cutoff - days * 86_400_000;
+  const recent = runs.filter((r) => r.ts >= cutoff);
+  const older = runs.filter((r) => r.ts >= olderCutoff && r.ts < cutoff);
+  /** @param {TestRun[]} rs */
+  const rate = (rs) => (rs.length > 0 ? rs.filter((r) => r.status === 'FAILURE').length / rs.length : 0);
+  const recentRate = rate(recent);
+  const olderRate = rate(older);
+  return { recentRate, olderRate, delta: recentRate - olderRate, recentRuns: recent.length, olderRuns: older.length };
+}
+
+/** @param {number} pct */
+function failRateBar(pct) {
+  const red = Math.round(pct / 20);
+  return ':red_circle:'.repeat(red) + ':large_green_circle:'.repeat(5 - red);
+}
+
+/**
+ * Names of tests that failed in the most recent failed builds of a config.
+ * @param {string} configId
+ * @param {number} builds
+ * @returns {Promise<string[]>}
+ */
+async function recentlyFailedInTeamCity(configId, builds) {
+  const buildData = await tcApi(
+    `/app/rest/builds?locator=count:${builds},buildType:(id:${encodeURIComponent(configId)}),status:FAILURE&fields=build(id)`,
+  );
+  /** @type {Array<{ id: number }>} */
+  const failedBuilds = buildData.build || [];
+  const lists = await Promise.all(
+    failedBuilds.map((b) =>
+      tcApi(`/app/rest/testOccurrences?locator=build:(id:${b.id}),status:FAILURE&fields=testOccurrence(name)`),
+    ),
+  );
+  return lists.flatMap((l) => (l.testOccurrence || []).map((/** @type {{ name: string }} */ t) => t.name));
 }
 
 export const flakyTestsTool = tool(
   'teamcity_flaky_tests',
-  'Scan for flaky tests (tests that pass sometimes and fail other times). ' +
-    'Uses persistent history when available, falls back to live TeamCity API. ' +
+  'Scan for flaky tests (tests that pass sometimes and fail other times). Candidates come from recent failed ' +
+    'builds and the failure log; every fail rate is computed from TeamCity history. ' +
     KEY_CONFIGS_HINT.trim(),
   {
     config_id: z.string().describe(`Build configuration ID, e.g. '${EXAMPLE_CONFIG}'.`),
-    days: z.number().optional().describe('Look back this many days (default 30). Uses stored history.'),
-    builds: z
-      .number()
-      .optional()
-      .describe('Number of recent builds to scan via TC API if no stored data (default 10).'),
-    history: z.number().optional().describe('Number of historical runs to check per test via TC API (default 15).'),
+    days: z.number().optional().describe('Also consider tests logged as failing in the last N days (default 30).'),
+    builds: z.number().optional().describe('Number of recent failed builds to scan for candidates (default 10).'),
+    history: z.number().optional().describe('Number of recent runs to check per test (default 15).'),
   },
   async ({ config_id, days = 30, builds: rawBuilds = 10, history: rawHistory = 15 }) => {
-    const summary = getStoreSummary(config_id);
-
-    if (summary.buildCount >= 5) {
-      const flaky = getFlakyTests(config_id, { days, minRuns: 3 });
-      if (flaky.length === 0) {
-        return textResult(
-          `No flaky tests found in \`${config_id}\` over the last ${days} days (${summary.buildCount} builds tracked).`,
-        );
-      }
-
-      const lines = [
-        `**${flaky.length} flaky test(s) in \`${config_id}\`** (last ${days} days, ${summary.buildCount} builds tracked):\n`,
-      ];
-      for (const t of flaky.slice(0, 15)) {
-        const pct = Math.round(t.failRate * 100);
-        const bar =
-          ':red_circle:'.repeat(Math.round(pct / 20)) + ':large_green_circle:'.repeat(5 - Math.round(pct / 20));
-        lines.push(`${bar} **${pct}%** fail rate ${trendEmoji(t.trend)} \`${t.shortName}\``);
-        lines.push(`  _${t.failures}F / ${t.passes}P out of ${t.total} runs_`);
-      }
-      if (flaky.length > 15) lines.push(`  ... and ${flaky.length - 15} more`);
-      return textResult(lines.join('\n'));
-    }
-
     const builds = Math.min(rawBuilds, 25);
-    const historyCount = Math.min(rawHistory, 30);
+    const historyCount = Math.min(rawHistory, MAX_HISTORY_RUNS);
     try {
-      const safeConfigId = encodeURIComponent(config_id);
-      const buildData = await tcApi(
-        `/app/rest/builds?locator=count:${builds},buildType:(id:${safeConfigId}),status:FAILURE&fields=build(id,number)`,
-      );
-      const buildList = buildData.build || [];
-
-      if (buildList.length === 0) {
-        return textResult(`No recent failed builds found for \`${config_id}\`.`);
+      const candidateCounts = new Map();
+      for (const name of await recentlyFailedInTeamCity(config_id, builds)) {
+        candidateCounts.set(name, (candidateCounts.get(name) || 0) + 1);
+      }
+      for (const { name, failures } of getRecentFailures(config_id, days)) {
+        candidateCounts.set(name, (candidateCounts.get(name) || 0) + failures);
+      }
+      if (candidateCounts.size === 0) {
+        return textResult(`No test failures found for \`${config_id}\` in recent builds or the last ${days} days.`);
       }
 
-      const testSet = new Map();
-      for (const build of buildList) {
-        const failData = await tcApi(
-          `/app/rest/testOccurrences?locator=build:(id:${build.id}),status:FAILURE&fields=testOccurrence(name)`,
-        );
-        for (const t of failData.testOccurrence || []) {
-          if (!testSet.has(t.name)) testSet.set(t.name, 0);
-          testSet.set(t.name, testSet.get(t.name) + 1);
-        }
-      }
+      const candidates = [...candidateCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, MAX_CANDIDATES)
+        .map(([name]) => name);
+      const histories = await Promise.all(candidates.map((name) => getTestHistory(name, config_id, historyCount)));
 
-      const candidates = [...testSet.entries()]
-        .filter(([, count]) => count < buildList.length)
-        .sort((a, b) => b[1] - a[1]);
-
-      if (candidates.length === 0) {
-        const alwaysFailing = testSet.size;
-        return textResult(
-          alwaysFailing > 0
-            ? `No flaky tests found. ${alwaysFailing} test(s) fail consistently across all ${buildList.length} builds.`
-            : `No test failures found in the last ${buildList.length} builds.`,
-        );
-      }
-
-      const toAnalyze = candidates.slice(0, 20);
+      /** @type {Array<{ shortName: string, pct: number, passes: number, failures: number, total: number }>} */
       const results = [];
-
-      for (const [testName] of toAnalyze) {
-        const hist = await getTestHistory(testName, config_id, historyCount);
+      let broken = 0;
+      candidates.forEach((name, i) => {
+        const hist = histories[i];
         const classification = classifyTest(hist.rate, hist.total);
-        if (classification === 'flaky') {
-          const sn = shortTestName(testName);
-          const pct = Math.round(hist.rate * 100);
-          results.push({ shortName: sn, pct, passes: hist.passes, failures: hist.failures, total: hist.total });
-        }
-      }
-
+        if (classification === 'broken') broken++;
+        if (classification !== 'flaky') return;
+        results.push({ shortName: shortTestName(name), pct: Math.round(hist.rate * 100), ...hist });
+      });
       results.sort((a, b) => b.pct - a.pct);
 
       if (results.length === 0) {
-        return textResult(`No flaky tests detected in \`${config_id}\` across ${buildList.length} recent builds.`);
+        const brokenNote = broken > 0 ? ` ${broken} test(s) are failing consistently (broken, not flaky).` : '';
+        return textResult(
+          `No flaky tests detected among ${candidates.length} recent failures in \`${config_id}\`.${brokenNote}`,
+        );
       }
 
       const lines = [
-        `**${results.length} flaky test(s) in \`${config_id}\`** (last ${buildList.length} builds, ${historyCount} runs each):\n`,
+        `**${results.length} flaky test(s) in \`${config_id}\`** (${candidates.length} recently failing tests checked, up to ${historyCount} runs each):\n`,
       ];
-      lines.push('_Note: building up persistent history. Future queries will be faster._\n');
-      for (const r of results) {
-        const bar =
-          ':red_circle:'.repeat(Math.round(r.pct / 20)) + ':large_green_circle:'.repeat(5 - Math.round(r.pct / 20));
-        lines.push(`${bar} **${r.pct}%** fail rate \`${r.shortName}\``);
+      for (const r of results.slice(0, 15)) {
+        lines.push(`${failRateBar(r.pct)} **${r.pct}%** fail rate \`${r.shortName}\``);
         lines.push(`  _${r.failures}F / ${r.passes}P out of ${r.total} runs_`);
       }
-
+      const more = andMore(results.length, 15);
+      if (more) lines.push(more);
       return textResult(lines.join('\n'));
     } catch (e) {
-      return textResult(`Flaky tracker error: ${e.message}`);
+      return textResult(`Flaky tracker error: ${e.message}`, true);
     }
   },
 );
 
 export const flakyTrendsTool = tool(
   'teamcity_flaky_trends',
-  'Show tests whose flakiness got worse recently. Compares fail rates between two time windows ' +
-    'to surface tests that are deteriorating. Requires persistent history (builds up over time).',
+  'Show tests whose fail rate got worse recently, comparing the last N days with the N days before. ' +
+    'Candidates come from the failure log; rates come from TeamCity history.',
   {
     config_id: z.string().describe(`Build configuration ID, e.g. '${EXAMPLE_CONFIG}'.`),
     days: z.number().optional().describe('Compare last N days vs the N days before that (default 7).'),
   },
   async ({ config_id, days = 7 }) => {
-    const summary = getStoreSummary(config_id);
-    if (summary.buildCount < 5) {
+    const candidates = getRecentFailures(config_id, days * 2).slice(0, MAX_CANDIDATES);
+    if (candidates.length === 0) {
       return textResult(
-        `Not enough stored data for \`${config_id}\` yet (${summary.buildCount} builds). ` +
-          'Trends build up automatically as build notifications arrive.',
+        `No failures logged for \`${config_id}\` in the last ${days * 2} days, so there is nothing to compare. ` +
+          'The failure log fills up as build failure notifications arrive.',
       );
     }
 
-    const worsening = getWorseningTests(config_id, { days });
-    if (worsening.length === 0) {
-      return textResult(`No tests got significantly worse in \`${config_id}\` over the last ${days} days.`);
-    }
+    try {
+      const histories = await Promise.all(candidates.map((c) => getTestHistory(c.name, config_id, MAX_HISTORY_RUNS)));
+      const worsening = candidates
+        .map((c, i) => ({ shortName: c.shortName, ...compareWindows(histories[i].runs, days) }))
+        .filter((t) => t.recentRuns >= 2 && t.olderRuns >= 2 && t.delta > WORSENING_DELTA)
+        .sort((a, b) => b.delta - a.delta);
 
-    const lines = [
-      `**${worsening.length} test(s) getting worse in \`${config_id}\`** (last ${days}d vs prior ${days}d):\n`,
-    ];
-    for (const t of worsening.slice(0, 10)) {
-      const oldPct = Math.round(t.olderRate * 100);
-      const newPct = Math.round(t.recentRate * 100);
-      const deltaPct = Math.round(t.delta * 100);
-      lines.push(`:chart_with_upwards_trend: \`${t.shortName}\``);
-      lines.push(`  ${oldPct}% :arrow_right: ${newPct}% (+${deltaPct}pp, ${t.recentRuns} recent runs)`);
-    }
-    if (worsening.length > 10) lines.push(`  ... and ${worsening.length - 10} more`);
+      if (worsening.length === 0) {
+        return textResult(`No tests got significantly worse in \`${config_id}\` over the last ${days} days.`);
+      }
 
-    return textResult(lines.join('\n'));
+      const lines = [
+        `**${worsening.length} test(s) getting worse in \`${config_id}\`** (last ${days}d vs prior ${days}d):\n`,
+      ];
+      for (const t of worsening.slice(0, 10)) {
+        const oldPct = Math.round(t.olderRate * 100);
+        const newPct = Math.round(t.recentRate * 100);
+        const deltaPct = Math.round(t.delta * 100);
+        lines.push(`:chart_with_upwards_trend: \`${t.shortName}\``);
+        lines.push(`  ${oldPct}% :arrow_right: ${newPct}% (+${deltaPct}pp, ${t.recentRuns} recent runs)`);
+      }
+      const more = andMore(worsening.length, 10);
+      if (more) lines.push(more);
+      return textResult(lines.join('\n'));
+    } catch (e) {
+      return textResult(`Flaky trends error: ${e.message}`, true);
+    }
   },
 );
 
 export const testTimelineTool = tool(
   'teamcity_test_timeline',
   'Show the pass/fail timeline for a specific test. Use this to answer "when did test X start failing?" ' +
-    'or "what is the history of this test?". Search by partial name if unsure of the full name.',
+    'or "what is the history of this test?". Partial names are matched against tests that have failed before.',
   {
     config_id: z.string().describe(`Build configuration ID, e.g. '${EXAMPLE_CONFIG}'.`),
     test_name: z.string().describe('Full or partial test name to look up.'),
   },
   async ({ config_id, test_name }) => {
-    let timeline = getTestTimeline(config_id, test_name);
-
-    if (!timeline) {
-      const matches = searchTests(config_id, test_name);
-      if (matches.length === 0) {
-        return textResult(
-          `No stored history found for "${test_name}" in \`${config_id}\`. History builds up as build notifications arrive.`,
-        );
+    const matches = searchTests(config_id, test_name);
+    const exact = matches.find((m) => m.name === test_name);
+    if (!exact && matches.length > 1) {
+      const lines = [`Multiple matches for "${test_name}":\n`];
+      for (const m of matches.slice(0, 10)) {
+        lines.push(`- \`${m.shortName}\` (${m.failures} logged failures)`);
       }
-      if (matches.length === 1) {
-        timeline = getTestTimeline(config_id, matches[0].name);
-      } else {
-        const lines = [`Multiple matches for "${test_name}":\n`];
-        for (const m of matches.slice(0, 10)) {
-          const pct = Math.round(m.failRate * 100);
-          lines.push(`- \`${m.shortName}\` (${pct}% fail rate, ${m.total} runs)`);
-        }
-        lines.push('\nUse a more specific name to see the full timeline.');
-        return textResult(lines.join('\n'));
-      }
+      lines.push('\nUse a more specific name to see the full timeline.');
+      return textResult(lines.join('\n'));
     }
+    const name = exact?.name || matches[0]?.name || test_name;
 
-    if (!timeline) return textResult(`No history found for "${test_name}".`);
+    const hist = await getTestHistory(name, config_id, 20);
+    if (hist.rate < 0) return textResult(`Could not load history for "${test_name}" from TeamCity.`, true);
+    if (hist.total === 0) return textResult(`No runs of "${test_name}" found in TeamCity for \`${config_id}\`.`);
 
-    const pct = Math.round(timeline.failRate * 100);
-    const firstDate = new Date(timeline.firstSeen).toISOString().slice(0, 10);
-    const lastFailDate = timeline.lastFailed ? new Date(timeline.lastFailed).toISOString().slice(0, 10) : 'never';
+    const pct = Math.round(hist.rate * 100);
+    const lastFail = hist.runs.find((r) => r.status === 'FAILURE');
+    const lastFailDate = lastFail?.ts ? new Date(lastFail.ts).toISOString().slice(0, 10) : 'not in these runs';
+    const chronological = [...hist.runs].reverse();
 
     const lines = [
-      `**${timeline.shortName}**`,
-      `Overall fail rate: **${pct}%** across ${timeline.runs.length} recorded runs`,
-      `First seen: ${firstDate} | Last failed: ${lastFailDate}\n`,
-      '*Recent runs:*',
+      `**${shortTestName(name)}**`,
+      `Fail rate: **${pct}%** over the last ${hist.total} runs (${classifyTest(hist.rate, hist.total)})`,
+      `Last failed: ${lastFailDate}\n`,
+      '*Recent runs (oldest → newest):*',
+      chronological.map((r) => (r.status === 'FAILURE' ? ':red_circle:' : ':large_green_circle:')).join(''),
+      chronological
+        .map((r) => {
+          const d = r.ts ? new Date(r.ts).toISOString().slice(5, 10) : '--';
+          const build = r.buildNumber ? ` #${r.buildNumber}` : '';
+          return `  ${d} ${r.status === 'FAILURE' ? 'F' : 'P'}${build}`;
+        })
+        .join('\n'),
     ];
-
-    const recent = timeline.runs.slice(-20);
-    const runLine = recent.map((r) => (r.status === 'FAILURE' ? ':red_circle:' : ':large_green_circle:')).join('');
-    lines.push(runLine);
-
-    const recentDates = recent.map((r) => {
-      const d = new Date(r.ts).toISOString().slice(5, 10);
-      const status = r.status === 'FAILURE' ? 'F' : 'P';
-      const build = r.buildNumber ? ` #${r.buildNumber}` : '';
-      return `  ${d} ${status}${build}`;
-    });
-    lines.push(recentDates.join('\n'));
-
     return textResult(lines.join('\n'));
   },
 );

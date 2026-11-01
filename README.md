@@ -37,7 +37,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | | Capability | What it does |
 |---|---|---|
 | 🔴 | **Automatic build-failure analysis** | Watches TeamCity notifications in Slack and replies in-thread with new vs. pre-existing failures, flaky tests, the real error behind Cypress/Docker boilerplate, and a ranked list of likely-culprit commits. |
-| ♻️ | **Flaky-test tracker** | Records every analysed build to a persistent history and answers "what's flaky?", "what got worse this week?", and "when did this test start failing?". |
+| ♻️ | **Flaky-test tracker** | Answers "what's flaky?", "what got worse this week?", and "when did this test start failing?" from TeamCity's test history. |
 | 🎫 | **YouTrack assistant** | Search, read, create, and update issues in natural language, with explicit confirmation before any write. |
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
 | 📝 | **"Create YouTrack Ticket" shortcut** | Message shortcut that turns any Slack message (and its surrounding context) into a pre-filled ticket. |
@@ -82,12 +82,15 @@ Fenix's agent can only call the tools below. It runs with Claude Code's built-in
 
 | Tool | Purpose |
 |---|---|
-| `teamcity_flaky_tests` | Tests with a 15–90% fail rate. Uses stored history, falls back to the live TeamCity API. |
+| `teamcity_flaky_tests` | Recently failing tests whose fail rate is between 15% and 90%. |
 | `teamcity_flaky_trends` | Tests whose fail rate rose between two time windows. |
 | `teamcity_test_timeline` | Pass/fail history of one test, with partial-name search. |
 
-> A test failing in more than 90% of runs is classed as **broken**, not flaky. History builds up automatically from
-> every failure notification Fenix analyses (capped at 60 runs per test and 300 builds per configuration).
+> **TeamCity is the source of truth.** Every fail rate, label, trend, and timeline is computed from TeamCity's test
+> history (up to 60 runs per test). A test failing in 90% or more of its runs is **broken**, not flaky, and at least
+> 3 runs are needed before a test is labelled. Fenix also keeps a local *failure log* from build notifications
+> (`data/flaky/`), used only to find candidate tests and to match partial names: notifications only cover failed
+> builds, so the log cannot produce fail rates on its own.
 
 ### YouTrack
 
@@ -158,7 +161,7 @@ How it gets there:
    text, including German domain terms mapped to English code names (e.g. *Rechnung* to `invoice`, *Lieferadresse* to
    `delivery` and `address`). Merge commits are demoted.
 4. **Historical correlation.** Files that changed in earlier builds where the same test failed add evidence.
-5. **Classification.** Each failure is labelled new, pre-existing, flaky, or broken using the flaky-test history.
+5. **Classification.** Each failure is labelled new, pre-existing, flaky, or broken from its TeamCity history.
 
 ## Architecture
 
@@ -193,7 +196,7 @@ flowchart LR
 | **Agent** | `query()` from the Claude Agent SDK with a generated system prompt, `maxTurns: 15`, and a 120 s timeout. At most 3 agent runs execute concurrently, and one per thread. |
 | **Tools** | Defined with `tool()` and Zod schemas, served by an in-process MCP server (`createSdkMcpServer`). Slack-bound tools are closures over the current channel and thread. |
 | **Conversation state** | Only SDK session IDs are stored, keyed by `channel:thread_ts` (24 h TTL, 1,000 entries). Each mention or DM resumes its thread's session. |
-| **Persistence** | JSON files under `data/`: feedback (last 500 entries) and per-configuration flaky-test history. |
+| **Persistence** | JSON files under `data/`: feedback (last 500 entries) and a per-configuration failure log. |
 
 ## Configuration
 
@@ -300,11 +303,11 @@ WantedBy=multi-user.target
 
 ## Security model
 
-- **Owner allowlist.** Only `ownerIds` can use the agent. Others get one polite reply in DMs and mentions, and silence
+- **Owner allowlist.** Only `ownerIds` can use the agent. Others get a polite reply in DMs and mentions, and silence
   everywhere else.
-- **Input guard.** Ready for when access opens beyond the owners: messages from non-owners that probe for
-  credentials or infrastructure, or try prompt injection, get a warning. A second attempt blocks the user for
-  24 hours.
+- **Input guard.** Every non-owner request is screened before the access check: probing for credentials or
+  infrastructure, or attempting prompt injection, earns a warning, and a second attempt within 24 hours blocks the
+  user. Owners are never screened.
 - **Least-privilege agent.** Built-in file, shell, and web tools are disabled. The agent can call only the tools in the
   catalog above.
 - **Write confirmation.** YouTrack issues are never created or changed without explicit approval in the thread.

@@ -42,6 +42,8 @@ describe('getTestHistory', () => {
     const url = fetchMock.mock.calls[0].arguments[0];
     assert.ok(url.includes(`test:(name:${locatorValue(NAME)})`), url);
     assert.ok(!url.includes(encodeURIComponent(NAME)));
-    assert.deepStrictEqual(history, { passes: 2, failures: 1, total: 3, rate: 1 / 3 });
+    const { runs, ...counts } = history;
+    assert.deepStrictEqual(counts, { passes: 2, failures: 1, total: 3, rate: 1 / 3 });
+    assert.strictEqual(runs.length, 3);
   });
 });

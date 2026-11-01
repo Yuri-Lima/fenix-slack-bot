@@ -5,14 +5,18 @@ import { baseUrl, config, resolvePath } from '../config.js';
 import { addFeedback, feedbackStats, listFeedback } from '../utils/feedback-store.js';
 import { textResult } from '../utils/helpers.js';
 import { isWhitelisted } from '../utils/input-guard.js';
+import { BROKEN_MIN_RATE, FLAKY_MIN_RATE, MIN_RUNS } from './tools/flaky-tracker.js';
 import { ALL_TOOLS } from './tools/index.js';
 
 const MAX_CONCURRENT_AGENTS = 3;
 const AGENT_TIMEOUT_MS = 120_000;
+export const AGENT_TIMEOUT_MESSAGE = `That took longer than ${AGENT_TIMEOUT_MS / 60_000} minutes, so I stopped. Try a narrower question, or ask again in a moment.`;
 const MCP_PREFIX = 'mcp__fenix-tools__';
 let activeAgents = 0;
 const threadLocks = new Set();
 
+/** @param {number} rate */
+const pct = (rate) => `${Math.round(rate * 100)}%`;
 const YT_PROJECT = config.youtrack.project;
 const KEY_CONFIGS = config.teamcity.keyConfigs;
 
@@ -58,18 +62,18 @@ ${KEY_CONFIGS.map((c) => `- \`${c.id}\` — ${c.description}\n`).join('')}\
 - Always include the build link for easy access
 
 ## FLAKY TEST TRACKER
-Persistent history of test results, built up automatically from every build notification.
+Fail rates always come from TeamCity's test history. Fenix also keeps a log of tests that failed in \
+build notifications, used to find candidates and to match partial test names.
 
 **Available tools:**
-- \`teamcity_flaky_tests\` — list all flaky tests for a config (uses stored history when available, falls back to TC API)
+- \`teamcity_flaky_tests\` — list flaky tests for a config (candidates from recent failed builds and the failure log)
 - \`teamcity_flaky_trends\` — show tests that got worse recently (compares recent vs older fail rates)
-- \`teamcity_test_timeline\` — full pass/fail history for a specific test (supports partial name search)
+- \`teamcity_test_timeline\` — pass/fail timeline for a specific test (supports partial name search)
 
 **Key concepts:**
-- A test is "flaky" if it passes in some builds and fails in others (15-90% fail rate)
-- A test failing in >90% of runs is "broken", not flaky
+- A test is "flaky" if it fails in ${pct(FLAKY_MIN_RATE)}–${pct(BROKEN_MIN_RATE)} of its recent runs (at least ${MIN_RUNS} runs)
+- A test failing in ${pct(BROKEN_MIN_RATE)} or more of its runs is "broken", not flaky
 - Trends compare the last N days vs the N days before that to detect deterioration
-- History builds up automatically; the more builds recorded, the more accurate the data
 
 **When someone asks about flaky tests:**
 1. Use \`teamcity_flaky_tests\` for "what tests are flaky?" or "show me flaky tests"
@@ -406,6 +410,8 @@ export async function runFenixAgent(text, sessionId = undefined, deps = undefine
   activeAgents++;
   if (threadKey) threadLocks.add(threadKey);
 
+  // The SDK only honours an AbortController passed in options; aborting it
+  // stops the run so the finally block always frees the slot and thread lock.
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), AGENT_TIMEOUT_MS);
 
@@ -413,7 +419,7 @@ export async function runFenixAgent(text, sessionId = undefined, deps = undefine
     const responseParts = [];
     let newSessionId = null;
 
-    for await (const message of query({ prompt: text, options, signal: ac.signal })) {
+    for await (const message of query({ prompt: text, options: { ...options, abortController: ac } })) {
       if (message.type === 'assistant') {
         for (const block of message.message.content) {
           if (block.type === 'text') {
@@ -428,6 +434,11 @@ export async function runFenixAgent(text, sessionId = undefined, deps = undefine
 
     const responseText = responseParts.join('\n');
     return { responseText, sessionId: newSessionId };
+  } catch (e) {
+    if (ac.signal.aborted) {
+      return { responseText: AGENT_TIMEOUT_MESSAGE, sessionId: null };
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
     activeAgents--;

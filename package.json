@@ -8,7 +8,7 @@
     "start": "node app.js",
     "lint": "npx @biomejs/biome check .",
     "lint:fix": "npx @biomejs/biome check --write .",
-    "test": "FENIX_CONFIG=tests/fixtures/fenix.config.json node --test",
+    "test": "FENIX_CONFIG=tests/fixtures/fenix.config.json node --test --experimental-test-module-mocks",
     "vps:status": "scripts/vps.sh status",
     "vps:restart": "scripts/vps.sh restart",
     "vps:stop": "scripts/vps.sh stop",

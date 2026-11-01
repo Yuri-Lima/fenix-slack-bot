@@ -1,13 +1,5 @@
-import { config } from '../../config.js';
 import { sessionStore } from '../../thread-context/index.js';
-import {
-  ACCESS_DENIED_MESSAGE,
-  addStrike,
-  classifyInput,
-  GUARD_MESSAGES,
-  isBlocked,
-  isWhitelisted,
-} from '../../utils/input-guard.js';
+import { GENERIC_ERROR_MESSAGE, gateRequest, isWhitelisted } from '../../utils/input-guard.js';
 import { replyWithAgent } from '../reply-with-agent.js';
 import { handleDeleteCommand, isDeleteCommand } from './delete-thread.js';
 
@@ -38,25 +30,28 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     const text = event.text || '';
     const threadTs = event.thread_ts || event.ts;
 
+    const cleanedText = text.replace(/<@[A-Z0-9]+>/g, '').trim();
+
     // `@Fenix delete` removes the bot's messages from the thread. Owner-only;
     // anyone else sending it is ignored without a reply.
-    if (isDeleteCommand(text.replace(/<@[A-Z0-9]+>/g, ''))) {
+    if (isDeleteCommand(cleanedText)) {
       if (!isWhitelisted(event.user)) return;
       await handleDeleteCommand({ client, event, botUserId: context.botUserId, botId: context.botId, logger });
       return;
     }
 
-    // Access gate: only whitelisted users can interact with the bot
-    if (!isWhitelisted(event.user)) {
-      await say({
-        text: ACCESS_DENIED_MESSAGE,
-        thread_ts: threadTs,
-      });
+    // Input guard + access gate: non-owners get a guard warning or the
+    // access-denied reply instead of the agent
+    const gate = gateRequest(event.user, cleanedText);
+    if (gate) {
+      if (gate.verdict !== 'clean') {
+        logger.warn(
+          `Input guard: user=${event.user} verdict=${gate.verdict} strikes=${gate.strikes} text="${cleanedText.slice(0, 80)}"`,
+        );
+      }
+      await say({ text: gate.reply, thread_ts: threadTs });
       return;
     }
-
-    // Strip the bot mention from the text
-    const cleanedText = text.replace(/<@[A-Z0-9]+>/g, '').trim();
 
     if (!cleanedText) {
       await say({
@@ -64,27 +59,6 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
         thread_ts: threadTs,
       });
       return;
-    }
-
-    // Input guard: whitelisted users bypass all checks
-    if (!isWhitelisted(event.user)) {
-      if (isBlocked(event.user)) {
-        await say({ text: GUARD_MESSAGES.blocked, thread_ts: threadTs });
-        return;
-      }
-      const { verdict } = classifyInput(cleanedText);
-      if (verdict !== 'clean') {
-        const count = addStrike(event.user);
-        if (count >= 2) {
-          await say({ text: GUARD_MESSAGES.blocked, thread_ts: threadTs });
-        } else {
-          await say({ text: GUARD_MESSAGES[verdict], thread_ts: threadTs });
-        }
-        logger.warn(
-          `Input guard: user=${event.user} verdict=${verdict} strikes=${count} text="${cleanedText.slice(0, 80)}"`,
-        );
-        return;
-      }
     }
 
     // Add eyes reaction only to the first message (not threaded replies)
@@ -113,9 +87,6 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     });
   } catch (e) {
     logger.error(`Failed to handle app mention: ${e}`);
-    await say({
-      text: `:warning: Something went wrong. Please try again or contact ${config.ownerName}.`,
-      thread_ts: event.thread_ts || event.ts,
-    });
+    await say({ text: GENERIC_ERROR_MESSAGE, thread_ts: event.thread_ts || event.ts });
   }
 }

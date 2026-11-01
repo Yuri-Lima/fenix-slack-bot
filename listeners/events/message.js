@@ -1,13 +1,6 @@
 import { config } from '../../config.js';
 import { sessionStore } from '../../thread-context/index.js';
-import {
-  ACCESS_DENIED_MESSAGE,
-  addStrike,
-  classifyInput,
-  GUARD_MESSAGES,
-  isBlocked,
-  isWhitelisted,
-} from '../../utils/input-guard.js';
+import { GENERIC_ERROR_MESSAGE, gateRequest, isWhitelisted } from '../../utils/input-guard.js';
 import { replyWithAgent } from '../reply-with-agent.js';
 
 /**
@@ -89,47 +82,30 @@ export async function handleMessage({ client, context, event, logger, say, saySt
   const isDm = event.channel_type === 'im';
   if (!isDm) return;
 
-  const effectiveUser = issueMetadata?.event_payload?.user_id || event.user;
+  const userId = issueMetadata?.event_payload?.user_id || event.user;
+  const text = event.text || '';
+  const threadTs = event.thread_ts || event.ts;
 
   // Forward DMs from non-whitelisted users to the admin DM channel
   if (!issueMetadata && !isWhitelisted(event.user)) {
     forwardDmToOwner(client, event, logger);
   }
 
-  // Access gate: only whitelisted users can interact with the bot
-  if (!isWhitelisted(effectiveUser)) {
-    await say({
-      text: ACCESS_DENIED_MESSAGE,
-      thread_ts: event.thread_ts || event.ts,
-    });
+  // Input guard + access gate: non-owners get a guard warning or the
+  // access-denied reply instead of the agent
+  const gate = gateRequest(userId, text);
+  if (gate) {
+    if (gate.verdict !== 'clean') {
+      logger.warn(
+        `Input guard: user=${userId} verdict=${gate.verdict} strikes=${gate.strikes} text="${text.slice(0, 80)}"`,
+      );
+    }
+    await say({ text: gate.reply, thread_ts: threadTs });
     return;
   }
 
   try {
     const channelId = event.channel;
-    const text = event.text || '';
-    const threadTs = event.thread_ts || event.ts;
-    const userId = issueMetadata?.event_payload?.user_id || event.user;
-
-    // Input guard: whitelisted users bypass all checks
-    if (!isWhitelisted(userId)) {
-      if (isBlocked(userId)) {
-        await say({ text: GUARD_MESSAGES.blocked, thread_ts: threadTs });
-        return;
-      }
-      const { verdict } = classifyInput(text);
-      if (verdict !== 'clean') {
-        const count = addStrike(userId);
-        if (count >= 2) {
-          await say({ text: GUARD_MESSAGES.blocked, thread_ts: threadTs });
-        } else {
-          await say({ text: GUARD_MESSAGES[verdict], thread_ts: threadTs });
-        }
-        logger.warn(`Input guard: user=${userId} verdict=${verdict} strikes=${count} text="${text.slice(0, 80)}"`);
-        return;
-      }
-    }
-
     const existingSessionId = sessionStore.getSession(channelId, threadTs);
 
     // Add eyes reaction only to the first message of the conversation
@@ -157,9 +133,6 @@ export async function handleMessage({ client, context, event, logger, say, saySt
     });
   } catch (e) {
     logger.error(`Failed to handle message: ${e}`);
-    await say({
-      text: `:warning: Something went wrong. Please try again or contact ${config.ownerName}.`,
-      thread_ts: event.thread_ts || event.ts,
-    });
+    await say({ text: GENERIC_ERROR_MESSAGE, thread_ts: threadTs });
   }
 }
