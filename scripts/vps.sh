@@ -35,7 +35,7 @@ case "${1:-}" in
     rsync -avz \
       --exclude='.env' --exclude='.env.deploy' --exclude='node_modules/' --exclude='.git/' \
       --exclude='.DS_Store' --exclude='.slack/' --exclude='.claude/' --exclude='data/' \
-      --exclude='*.webp' --exclude='*.jpg' \
+      --exclude='*.webp' --exclude='*.jpg' --exclude='tests/' --exclude='REVIEW-*.md' \
       -e "ssh -p $VPS_PORT -i $VPS_KEY" ./ "$TARGET:$VPS_PATH/"
     remote "cd $VPS_PATH && npm ci --omit=dev && chown -R $SERVICE_USER:$SERVICE_USER $VPS_PATH && systemctl restart $SERVICE && sleep 2 && systemctl status $SERVICE"
     ;;
