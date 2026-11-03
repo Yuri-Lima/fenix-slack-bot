@@ -86,11 +86,11 @@ The store uses a `Map` keyed by `${channelId}:${threadTs}` with TTL-based cleanu
 
 ### Dependency Injection
 
-`runFenixAgent(text, sessionId, deps)` takes a required `deps` object with `{ client, channelId, threadTs, messageTs, userId, userName }`. Tools that need Slack API access (emoji reactions, mark resolved) are created as closures inside `runCaseyAgent()` that capture the `deps` parameter. Static tools (knowledge base, tickets, etc.) remain as module-level exports in `agent/tools/`.
+`runFenixAgent(text, sessionId, deps)` takes a required `deps` object with `{ client, channelId, threadTs, messageTs, userId, userName }`. Tools that need Slack API access (emoji reactions, mark resolved, feedback) are created as closures inside `runFenixAgent()` that capture the `deps` parameter. Static tools (TeamCity, flaky tracker, YouTrack, GitLab) are module-level exports in `agent/tools/`, collected in `ALL_TOOLS`.
 
 ### Integrations
 
-`integrations/` is the single home of external API access: `http.js` (shared timeout, `requireConfigured`, uniform `<Service> API error (HTTP n)`), `teamcity.js` (client, request limiter, `locatorValue`, `buildUrl`, change helpers), `test-history.js` (TeamCity pass/fail history, flaky thresholds, classification), `youtrack.js` (client, attachment upload, issue URL, custom-field builders, issue types/priorities), and `gitlab.js` (client, blocked-path list). Agent tools in `agent/tools/` and Slack listeners import from here; never call these services with `fetch` directly or create a second token reader. Slack user names resolve through `utils/slack.js`.
+`integrations/` is the single home of external API access: `http.js` (shared timeout, `requireConfigured`, uniform `<Service> API error (HTTP n)`), `teamcity.js` (client, request limiter, `locatorValue`, `buildUrl`, change helpers), `test-history.js` (TeamCity pass/fail history, flaky thresholds, classification, infra-kill detection via `isInfraKill`), `youtrack.js` (client, attachment upload, issue URL, custom-field builders, issue types/priorities), and `gitlab.js` (client, blocked-path list). Agent tools in `agent/tools/` and Slack listeners import from here; never call these services with `fetch` directly or create a second token reader. Slack user names resolve through `utils/slack.js`.
 
 Tool handlers return `textResult(message, true)` from every `catch`, so the agent sees failures as errors.
 
