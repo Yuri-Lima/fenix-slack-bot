@@ -10,7 +10,7 @@ import {
   tcApi,
   tcFetchText,
 } from '../../integrations/teamcity.js';
-import { classifyTest, getTestHistory } from '../../integrations/test-history.js';
+import { classifyTest, getTestHistory, INFRA_KILL_NAME_SUFFIX, isInfraKill } from '../../integrations/test-history.js';
 import { recordBuildResults } from '../../utils/flaky-store.js';
 import { andMore, shortTestName } from '../../utils/helpers.js';
 
@@ -513,19 +513,24 @@ function fetchBuildChanges(buildId) {
  */
 const hasFiles = (change) => changedFiles(change).length > 0;
 
+/** @typedef {{ name?: string, newFailure?: boolean, duration?: number, details?: string }} TestOccurrence */
+
 async function analyzeBuild(buildId, configId) {
   const [details, failures, changes] = await Promise.all([
     tcApi(
       `/app/rest/builds/id:${buildId}?fields=id,number,status,statusText,buildType(id,name),triggered(date,user(name)),agent(name),statistics(property(name,value))`,
     ),
     tcApi(
-      `/app/rest/testOccurrences?locator=build:(id:${buildId}),status:FAILURE&fields=count,testOccurrence(name,newFailure,duration)`,
+      `/app/rest/testOccurrences?locator=build:(id:${buildId}),status:FAILURE&fields=count,testOccurrence(name,newFailure,duration,details)`,
     ),
     fetchBuildChanges(buildId),
   ]);
 
+  /** @type {TestOccurrence[]} */
   const tests = failures.testOccurrence || [];
-  const toCheck = tests.slice(0, 15);
+  // Infra kills (host OOM) are no test failures: no flaky history, no commit correlation.
+  const realTests = tests.filter((t) => !isInfraKill(t));
+  const toCheck = realTests.slice(0, 15);
   const flakyMap = new Map();
 
   const historyChecks = toCheck.map(async (t) => {
@@ -539,7 +544,7 @@ async function analyzeBuild(buildId, configId) {
   });
   await Promise.all(historyChecks);
 
-  const newFailures = tests.filter((t) => t.newFailure && !flakyMap.has(t.name));
+  const newFailures = realTests.filter((t) => t.newFailure && !flakyMap.has(t.name));
 
   let historicalFileFreq = new Map();
   if (newFailures.length > 0) {
@@ -628,6 +633,21 @@ function pushAuthorRanking(lines, scored) {
   });
 }
 
+/**
+ * Display label for an infra-killed occurrence: the suite that was killed.
+ * shortTestName() would collapse every kill to the identical fixed suffix.
+ * @param {string | undefined} name
+ * @returns {string}
+ */
+function infraKillLabel(name) {
+  const full = (name || '').trim();
+  if (full.endsWith(INFRA_KILL_NAME_SUFFIX)) {
+    const suite = full.slice(0, -INFRA_KILL_NAME_SUFFIX.length).replace(/[\s:]+$/, '');
+    if (suite) return shortTestName(suite);
+  }
+  return shortTestName(full);
+}
+
 export function formatAnalysis({
   details,
   failures,
@@ -639,7 +659,10 @@ export function formatAnalysis({
   originChanges,
 }) {
   const b = details;
-  const tests = failures.testOccurrence || [];
+  /** @type {TestOccurrence[]} */
+  const occurrences = failures.testOccurrence || [];
+  const infraKills = occurrences.filter(isInfraKill);
+  const tests = occurrences.filter((t) => !isInfraKill(t));
   const commits = changes.change || [];
 
   const netProp = b.statistics?.property?.find((p) => p.name === 'BuildDurationNetTime');
@@ -706,7 +729,22 @@ export function formatAnalysis({
     if (morePre) lines.push(morePre);
   }
 
-  if (tests.length === 0) {
+  if (infraKills.length > 0) {
+    lines.push('');
+    const n = infraKills.length;
+    lines.push(`*:gear: Infra: worker SIGKILLed (${n}):*`);
+    for (const t of infraKills.slice(0, 5)) {
+      lines.push(`  - \`${infraKillLabel(t.name)}\``);
+    }
+    const moreInfra = andMore(n, 5);
+    if (moreInfra) lines.push(moreInfra);
+    const where = agentName !== '?' ? `on ${agentName}` : 'on the agent';
+    lines.push(
+      `  _Killed by the host (likely OOM), not a test or commit problem. Check agent memory: \`journalctl -k\` ${where}._`,
+    );
+  }
+
+  if (tests.length === 0 && infraKills.length === 0) {
     lines.push('');
 
     const { core: coreError, hookContext } = extractRealError(b.statusText || '');
@@ -795,7 +833,8 @@ export async function handleTeamCityNotify({ client, event, logger }) {
     const allTests = analysis.failures.testOccurrence || [];
     if (allTests.length > 0) {
       try {
-        const results = allTests.map((t) => ({ name: t.name, status: 'FAILURE' }));
+        // recordBuildResults drops infra kills (details carry Jest's SIGKILL message)
+        const results = allTests.map((t) => ({ name: t.name, status: 'FAILURE', details: t.details }));
         recordBuildResults(parsed.configId, parsed.buildId, analysis.details.number || '', results, shortTestName);
       } catch (storeErr) {
         logger.error(`Flaky store write failed: ${storeErr}`);

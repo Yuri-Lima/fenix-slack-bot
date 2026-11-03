@@ -7,6 +7,7 @@ import {
   compareWindows,
   FLAKY_MIN_RATE,
   getTestHistory,
+  isInfraKill,
   MIN_RUNS,
   parseTcDate,
 } from '../../integrations/test-history.js';
@@ -25,6 +26,37 @@ describe('classifyTest', () => {
   it('refuses to classify with too few runs or a failed lookup', () => {
     assert.strictEqual(classifyTest(0.5, MIN_RUNS - 1), 'unknown');
     assert.strictEqual(classifyTest(-1, 10), 'unknown');
+  });
+});
+
+// Real strings from a backend-e2e incident where the kernel OOM killer
+// SIGKILLed Jest workers on the agents for ~15 builds in a row.
+describe('isInfraKill', () => {
+  it('flags the suite-level kill TeamCity reports as a test occurrence, by name', () => {
+    assert.ok(isInfraKill({ name: 'e2e: packages/api/e2e/order.e2e-spec.ts: Jest failed to execute suite' }));
+  });
+
+  it("flags a killed worker by Jest's SIGKILL message in the details", () => {
+    assert.ok(
+      isInfraKill({
+        name: 'OrderResolver (e2e): creates an order',
+        details:
+          'Jest worker was terminated by another process: signal=SIGKILL, exitCode=null. ' +
+          'Operating system logs may contain more information on why this occurred.',
+      }),
+    );
+  });
+
+  it('leaves real test failures alone', () => {
+    assert.ok(!isInfraKill({ name: 'OrderResolver (e2e): creates an order' }));
+    assert.ok(
+      !isInfraKill({
+        name: 'OrderResolver (e2e): creates an order',
+        details: 'expect(received).toEqual(expected) ... at order.e2e-spec.ts:120',
+      }),
+    );
+    assert.ok(!isInfraKill({ name: '' }));
+    assert.ok(!isInfraKill({}));
   });
 });
 

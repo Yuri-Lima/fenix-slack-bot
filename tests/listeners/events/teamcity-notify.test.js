@@ -221,3 +221,77 @@ describe('formatAnalysis author ranking', () => {
     assert.match(lines[alice + 1], /`aaaaaaa0` Invoice validation/);
   });
 });
+
+// Fixtures modelled on a real incident: the kernel OOM killer SIGKILLed Jest
+// workers on the agents for ~15 builds in a row. TeamCity reported each dead
+// suite as a failed test occurrence, and the bot blamed the builds' commit
+// authors. Names and commits are synthetic; the Jest strings are the real ones.
+describe('formatAnalysis infra kills', () => {
+  const JEST_SUITE_KILL = 'e2e: packages/api/e2e/order.e2e-spec.ts: Jest failed to execute suite';
+  const SIGKILL_DETAILS =
+    'Jest worker was terminated by another process: signal=SIGKILL, exitCode=null. ' +
+    'Operating system logs may contain more information on why this occurred.';
+
+  const commit = (sha, user, comment, files) => ({
+    version: sha.padEnd(40, '0'),
+    username: user,
+    user: { name: user },
+    comment,
+    files: { file: files.map((f) => ({ file: f })) },
+  });
+
+  const analysis = (testOccurrence, changes) => ({
+    details: {
+      id: 9,
+      number: '9',
+      status: 'FAILURE',
+      statusText: 'Tests failed: 15 (15 new)',
+      buildType: { id: 'Main_E2e', name: 'Main E2E' },
+      agent: { name: 'ci-agent-2' },
+      statistics: { property: [] },
+    },
+    failures: { testOccurrence },
+    changes: { change: changes },
+    flakyMap: new Map(),
+    historicalFileFreq: new Map(),
+    buildLogErrors: [],
+    errorOrigin: null,
+    originChanges: null,
+  });
+
+  it('reports the kill as infra and does not rank commit authors', () => {
+    const text = formatAnalysis(
+      analysis(
+        [
+          { name: JEST_SUITE_KILL, newFailure: true },
+          { name: 'ProductResolver (e2e): updates stock', newFailure: true, details: SIGKILL_DETAILS },
+        ],
+        [commit('aaaaaaa', 'alice.example', 'Order rework', ['packages/api/src/order/order.service.ts'])],
+      ),
+    );
+    assert.match(text, /Infra: worker SIGKILLed \(2\)/);
+    assert.match(text, /Check agent memory/);
+    assert.match(text, /`journalctl -k` on ci-agent-2/);
+    assert.ok(text.includes('packages/api/e2e/order.e2e-spec.ts'), text);
+    assert.ok(!text.includes('Likely cause'), text);
+    assert.ok(!text.includes('alice.example'), text);
+    assert.ok(!text.includes('New failures'), text);
+    assert.ok(!text.includes(':rotating_light:'), 'must not fall into build-error analysis');
+  });
+
+  it('still ranks commits for real new failures seen next to an infra kill', () => {
+    const text = formatAnalysis(
+      analysis(
+        [
+          { name: 'invoices: creates an invoice', newFailure: true, duration: 1000 },
+          { name: JEST_SUITE_KILL, newFailure: true },
+        ],
+        [commit('aaaaaaa', 'alice.example', 'Invoice validation', ['packages/api/src/invoice/invoice.service.ts'])],
+      ),
+    );
+    assert.match(text, /New failures \(1\)/);
+    assert.match(text, /Likely cause/);
+    assert.match(text, /alice\.example/);
+    assert.match(text, /Infra: worker SIGKILLed \(1\)/);
+  });
+});

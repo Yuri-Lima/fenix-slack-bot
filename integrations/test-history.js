@@ -78,6 +78,24 @@ export function classifyTest(rate, total) {
   return 'rare';
 }
 
+/** Synthetic occurrence TeamCity's Jest reporter emits when a suite's worker process died instead of running. */
+export const INFRA_KILL_NAME_SUFFIX = 'Jest failed to execute suite';
+/** Jest's message when the worker was killed from outside — on CI agents that is the kernel OOM killer. */
+const INFRA_KILL_DETAILS_MARKER = 'terminated by another process: signal=SIGKILL';
+
+/**
+ * True when a failed test occurrence is the host killing the test process
+ * (kernel OOM killer SIGKILLing a Jest worker), not a test failing. Such
+ * occurrences carry no signal about the code under test: they must not be
+ * blamed on commits and must stay out of the failure log.
+ * @param {{ name?: string, details?: string }} occurrence
+ * @returns {boolean}
+ */
+export function isInfraKill(occurrence) {
+  if ((occurrence?.name || '').trimEnd().endsWith(INFRA_KILL_NAME_SUFFIX)) return true;
+  return (occurrence?.details || '').includes(INFRA_KILL_DETAILS_MARKER);
+}
+
 /**
  * Fail rates in the last `days` vs the `days` before that.
  * @param {TestRun[]} runs

@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config, resolvePath } from '../config.js';
+import { isInfraKill } from '../integrations/test-history.js';
 
 // Failure log per build configuration. TeamCity only notifies Slack about
 // failed builds, so this records which tests failed and when -- it is not a
@@ -104,11 +105,13 @@ function pruneBuilds(data) {
 }
 
 /**
- * Record test results from a completed build.
+ * Record test results from a completed build. Infra kills (host OOM
+ * SIGKILLing a test worker, see isInfraKill) are skipped: they say nothing
+ * about the test and would poison the flaky-rate stats.
  * @param {string} configId
  * @param {number} buildId
  * @param {string} buildNumber
- * @param {Array<{ name: string, status: 'FAILURE' | 'SUCCESS' }>} testResults
+ * @param {Array<{ name: string, status: 'FAILURE' | 'SUCCESS', details?: string }>} testResults
  * @param {(name: string) => string} shortNameFn
  */
 export function recordBuildResults(configId, buildId, buildNumber, testResults, shortNameFn) {
@@ -120,7 +123,8 @@ export function recordBuildResults(configId, buildId, buildNumber, testResults, 
 
   const failedKeys = [];
 
-  for (const { name, status } of testResults) {
+  for (const { name, status, details } of testResults) {
+    if (isInfraKill({ name, details })) continue;
     const key = testKey(name);
     if (!data.tests[key]) {
       data.tests[key] = { name, shortName: shortNameFn(name), runs: [], lastSeen: 0, lastFailed: 0 };

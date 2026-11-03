@@ -36,7 +36,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 
 | | Capability | What it does |
 |---|---|---|
-| 🔴 | **Automatic build-failure analysis** | Watches TeamCity notifications in Slack and replies in-thread with new vs. pre-existing failures, flaky tests, the real error behind Cypress/Docker boilerplate, and a ranked list of likely-culprit commits. |
+| 🔴 | **Automatic build-failure analysis** | Watches TeamCity notifications in Slack and replies in-thread with new vs. pre-existing failures, flaky tests, the real error behind Cypress/Docker boilerplate, and a ranked list of likely-culprit commits. Workers SIGKILLed by the host (OOM) are reported as infrastructure, not blamed on commits. |
 | ♻️ | **Flaky-test tracker** | Answers "what's flaky?", "what got worse this week?", and "when did this test start failing?" from TeamCity's test history. |
 | 🎫 | **YouTrack assistant** | Search, read, create, and update issues in natural language, with explicit confirmation before any write. |
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
@@ -90,7 +90,8 @@ Fenix's agent can only call the tools below. It runs with Claude Code's built-in
 > history (up to 60 runs per test). A test failing in 90% or more of its runs is **broken**, not flaky, and at least
 > 3 runs are needed before a test is labelled. Fenix also keeps a local *failure log* from build notifications
 > (`data/flaky/`), used only to find candidate tests and to match partial names: notifications only cover failed
-> builds, so the log cannot produce fail rates on its own.
+> builds, so the log cannot produce fail rates on its own. Infra kills (test workers SIGKILLed by the host, see
+> below) never enter the log, so they cannot inflate a test's apparent flakiness.
 
 ### YouTrack
 
@@ -158,6 +159,10 @@ How it gets there:
    `delivery` and `address`). Merge commits are demoted.
 4. **Historical correlation.** Files that changed in earlier builds where the same test failed add evidence.
 5. **Classification.** Each failure is labelled new, pre-existing, flaky, or broken from its TeamCity history.
+6. **Infra kills.** An occurrence whose name ends with `Jest failed to execute suite`, or whose details carry Jest's
+   `terminated by another process: signal=SIGKILL`, means the host killed the worker (kernel OOM killer). Fenix
+   reports it as infrastructure ("worker SIGKILLed, check agent memory, `journalctl -k` on the agent"), ranks no
+   commit authors for it, and keeps it out of the failure log.
 
 ## Architecture
 
