@@ -273,6 +273,35 @@ export function errorFingerprint(statusText) {
   return norm.slice(0, 200);
 }
 
+// ── Build-level infra failures (OOM during image build, dead pre-test steps) ──
+
+/** Memory exhaustion during the Docker image build: BuildKit or kernel cgroup OOM. */
+const BUILD_OOM_MARKERS = [
+  /cannot allocate memory/i,
+  /ResourceExhausted/i,
+  /Memory cgroup out of memory/i,
+  /Out of memory: Killed process/i,
+];
+/** Steps that run before any test; their exit code is environment, not code under test. */
+const INFRA_STEP_RE = /exit code \d+ \(Step: Infra Up/i;
+
+/**
+ * Build-level infra classification for builds with no failed tests.
+ * 'oom-build': the image build was killed by a memory limit (cgroup or host OOM,
+ * e.g. #3324/#3326 on 2026-11-04: yarn install inside the capped buildx builder).
+ * 'infra-step': a pre-test infra step failed without OOM markers.
+ * Such builds carry no signal about the commits: never blame authors for them.
+ * @param {string} statusText
+ * @param {string[]} [buildLogErrors]
+ * @returns {{ kind: 'oom-build' | 'infra-step' } | null}
+ */
+export function classifyBuildInfraFailure(statusText, buildLogErrors = []) {
+  const text = `${statusText || ''}\n${(buildLogErrors || []).join('\n')}`;
+  if (BUILD_OOM_MARKERS.some((re) => re.test(text))) return { kind: 'oom-build' };
+  if (INFRA_STEP_RE.test(statusText || '')) return { kind: 'infra-step' };
+  return null;
+}
+
 // ── Error-to-commit scoring (bilingual codebase: German errors, English code) ──
 
 const DOMAIN_TERMS = [
@@ -555,15 +584,17 @@ async function analyzeBuild(buildId, configId) {
   let errorOrigin = null;
   let originChanges = null;
 
+  let infraFailure = null;
   if (tests.length === 0) {
-    const fingerprint = errorFingerprint(details.statusText || '');
-    [buildLogErrors, errorOrigin] = await Promise.all([
-      tcFetchText(`/downloadBuildLog.html?buildId=${buildId}&plain=true&lineCount=200`)
-        .then(extractBuildLogErrors)
-        // build log unavailable, statusText still carries the error
-        .catch(() => []),
-      findErrorOrigin(configId, buildId, fingerprint),
-    ]);
+    buildLogErrors = await tcFetchText(`/downloadBuildLog.html?buildId=${buildId}&plain=true&lineCount=200`)
+      .then(extractBuildLogErrors)
+      // build log unavailable, statusText still carries the error
+      .catch(() => []);
+    infraFailure = classifyBuildInfraFailure(details.statusText || '', buildLogErrors);
+    // An infra kill says nothing about the commits: skip the origin walk and the blame scoring.
+    if (!infraFailure) {
+      errorOrigin = await findErrorOrigin(configId, buildId, errorFingerprint(details.statusText || ''));
+    }
 
     if (errorOrigin) {
       try {
@@ -585,6 +616,7 @@ async function analyzeBuild(buildId, configId) {
     buildLogErrors,
     errorOrigin,
     originChanges,
+    infraFailure,
   };
 }
 
@@ -657,6 +689,7 @@ export function formatAnalysis({
   buildLogErrors,
   errorOrigin,
   originChanges,
+  infraFailure,
 }) {
   const b = details;
   /** @type {TestOccurrence[]} */
@@ -746,6 +779,28 @@ export function formatAnalysis({
 
   if (tests.length === 0 && infraKills.length === 0) {
     lines.push('');
+
+    if (infraFailure) {
+      if (infraFailure.kind === 'oom-build') {
+        lines.push('*:bricks: Infra failure: OOM during the Docker image build.*');
+        lines.push(
+          '  _A memory limit killed the build (cgroup or host OOM) before any test ran. This is agent infrastructure, not a code or test problem; the commits in this build are not suspects._',
+        );
+        lines.push(
+          '  _Check on the agent: `docker inspect buildx_buildkit_phx-cache0 --format "{{.HostConfig.Memory}}"` (builder cgroup cap, raised to 12G on 2026-11-04) and `journalctl -k | grep -iE "out of memory|oom"`._',
+        );
+      } else {
+        lines.push('*:bricks: Infra failure: a pre-test step failed (Infra Up).*');
+        lines.push(
+          '  _No test ran. Treat it as infrastructure until the step log says otherwise; the commits in this build are not suspects._',
+        );
+      }
+      const infraCommits = commits.filter(hasFiles);
+      if (infraCommits.length > 0) {
+        lines.push(`  _${infraCommits.length} commit${infraCommits.length > 1 ? 's' : ''} in this build, not analyzed for blame._`);
+      }
+      return lines.join('\n');
+    }
 
     const { core: coreError, hookContext } = extractRealError(b.statusText || '');
 

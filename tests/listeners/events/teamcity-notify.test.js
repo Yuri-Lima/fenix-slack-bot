@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  classifyBuildInfraFailure,
   errorFingerprint,
   expandErrorKeywords,
   extractBuildLogErrors,
@@ -293,5 +294,95 @@ describe('formatAnalysis infra kills', () => {
     assert.match(text, /Likely cause/);
     assert.match(text, /alice\.example/);
     assert.match(text, /Infra: worker SIGKILLed \(1\)/);
+  });
+});
+
+// Fixtures from the real incident of 2026-11-04 (#3324/#3326): yarn install
+// inside the memory-capped buildx builder got cgroup-OOM-killed during the
+// Infra Up step, before any Cypress test ran. The bot must call this infra
+// and must not rank commit authors for it.
+describe('classifyBuildInfraFailure', () => {
+  const STATUS_INFRA_OOM =
+    'Tests passed: 361; exit code 1 (Step: Infra Up (Command Line)); error message: ' +
+    'Step Infra Up (Command Line) failed; exit code 1 (Step: Running Electron Browser (Command Line))';
+  const LOG_OOM = [
+    'target phoenix-app: failed to solve: ResourceExhausted: process "/bin/sh -c npm install -g corepack ' +
+      '&& corepack enable && corepack prepare yarn@4.13.0 --activate && yarn install" did not complete successfully: cannot allocate memory',
+  ];
+
+  it('classifies the capped-builder OOM as oom-build', () => {
+    assert.deepEqual(classifyBuildInfraFailure(STATUS_INFRA_OOM, LOG_OOM), { kind: 'oom-build' });
+  });
+
+  it('classifies OOM markers in the statusText alone', () => {
+    assert.deepEqual(
+      classifyBuildInfraFailure('error message: cannot allocate memory', []),
+      { kind: 'oom-build' },
+    );
+    assert.deepEqual(
+      classifyBuildInfraFailure('kernel: Memory cgroup out of memory: Killed process 1484 (buildkitd)', []),
+      { kind: 'oom-build' },
+    );
+  });
+
+  it('classifies a dead Infra Up step without OOM markers as infra-step', () => {
+    assert.deepEqual(
+      classifyBuildInfraFailure('Tests passed: 361; exit code 1 (Step: Infra Up (Command Line))', []),
+      { kind: 'infra-step' },
+    );
+  });
+
+  it('does not classify ordinary failures as infra', () => {
+    assert.equal(classifyBuildInfraFailure('Tests failed: 2 (2 new), passed: 821', []), null);
+    assert.equal(
+      classifyBuildInfraFailure(
+        'Error message: GraphQL errors: Die Rechnung muss eine gültige Lieferadresse am Kunden haben.',
+        [],
+      ),
+      null,
+    );
+  });
+});
+
+describe('formatAnalysis build-level infra failure', () => {
+  const commit = (sha, user, comment, files) => ({
+    version: sha.padEnd(40, '0'),
+    username: user,
+    user: { name: user },
+    comment,
+    files: { file: files.map((f) => ({ file: f })) },
+  });
+
+  const base = {
+    details: {
+      id: 46476,
+      number: '3326',
+      buildType: { id: 'Master_PhxE2eFrontEnd', name: 'PHX E2E FrontEnd' },
+      statusText: 'Tests passed: 361; exit code 1 (Step: Infra Up (Command Line))',
+      agent: { name: 'external-agent-3' },
+      statistics: { property: [] },
+    },
+    failures: { testOccurrence: [] },
+    changes: { change: [commit('aaaaaaa', 'alice.example', 'Invoice validation', ['packages/api/src/invoice/invoice.service.ts'])] },
+    flakyMap: new Map(),
+    historicalFileFreq: new Map(),
+    buildLogErrors: [],
+    errorOrigin: null,
+    originChanges: null,
+  };
+
+  it('reports OOM builds as infra with no author ranking', () => {
+    const text = formatAnalysis({ ...base, infraFailure: { kind: 'oom-build' } });
+    assert.match(text, /Infra failure: OOM during the Docker image build/);
+    assert.match(text, /not suspects/);
+    assert.match(text, /not analyzed for blame/);
+    assert.ok(!text.includes('Likely cause'), text);
+    assert.ok(!text.includes('alice.example'), 'no author named on an infra failure');
+  });
+
+  it('reports dead infra steps as infra with no author ranking', () => {
+    const text = formatAnalysis({ ...base, infraFailure: { kind: 'infra-step' } });
+    assert.match(text, /Infra failure: a pre-test step failed/);
+    assert.ok(!text.includes('Likely cause'), text);
   });
 });
