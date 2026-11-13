@@ -22,7 +22,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {{ url: string | null, botId: string | null, prometheusUid: string | null, lokiUid: string | null, replyMode: 'dm' | 'thread' | 'off' }} grafana
  *   Grafana alert analysis. replyMode 'dm' sends analyses to adminDmChannel (preview), 'thread' replies under the alert.
  * @property {string} contextFile - Markdown appended to the system prompt (team-specific knowledge)
- * @property {{ enabled: boolean, host: string, port: number, path: string, publicUrl: string | null, oauthRedirectUris: string[] }} mcp
+ * @property {{ enabled: boolean, host: string, port: number, path: string, publicUrl: string | null, oauthRedirectUris: string[], cimdOrigins: string[] }} mcp
  *   MCP server (read-only tools). Static bearer FENIX_MCP_TOKEN for Claude Code; OAuth with Slack approval for
  *   Claude app connectors when publicUrl is set (only redirect URIs listed in oauthRedirectUris may register).
  * @property {{ retentionMonths: number }} usage - Agent usage log: monthly files kept for this many months
@@ -50,6 +50,8 @@ const DEFAULTS = {
     path: '/mcp',
     publicUrl: null,
     oauthRedirectUris: ['https://claude.ai/api/mcp/auth_callback', 'https://claude.com/api/mcp/auth_callback'],
+    // Origins whose Client ID Metadata Documents may be fetched (Claude's published client identities)
+    cimdOrigins: ['https://claude.ai', 'https://claude.com'],
   },
   timeZone: 'UTC',
 };

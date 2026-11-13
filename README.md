@@ -245,9 +245,14 @@ the Fenix server.
 
 - **Two ways to sign in:** Claude Code sends the static token as a header. Claude app connectors (claude.ai, desktop,
   mobile) cannot send headers, so the endpoint is also an **OAuth 2.1 authorization server** (MCP authorization spec):
-  protected-resource and authorization-server metadata under `/.well-known/`, dynamic client registration limited to
-  `mcp.oauthRedirectUris` (Claude's callback URLs), PKCE (S256) codes that work once, 1-hour access tokens, and 30-day
-  refresh tokens that rotate on every use. Tokens are stored only as SHA-256 hashes in `data/mcp-oauth.json`.
+  protected-resource and authorization-server metadata under `/.well-known/`, PKCE (S256) codes that work once,
+  1-hour access tokens, and 30-day refresh tokens that rotate on every use. Tokens are stored only as SHA-256 hashes
+  in `data/mcp-oauth.json`. Clients identify themselves in either of two ways:
+  - **Client ID Metadata Document (CIMD)**, Claude's recommended option: the `client_id` is an HTTPS URL that Fenix
+    fetches, only from `mcp.cimdOrigins` (Claude's origins). The document must name itself as `client_id`, be a
+    public client, and list allowed redirect URIs (Claude's callback, or loopback on any port for Claude Code). The
+    approval DM shows the verified origin, since the document's name is self-asserted.
+  - **Dynamic client registration**, limited to `mcp.oauthRedirectUris` (Claude's callback URLs).
 - **Every app sign-in is approved in Slack:** `/authorize` shows a "approve in Slack" page and Fenix DMs each owner
   an **Approve / Deny** button (only owners can decide; requests expire after 5 minutes). The page continues on its
   own once approved.
@@ -343,7 +348,7 @@ cp fenix.config.example.json fenix.config.json
 | `grafana.prometheusUid` / `grafana.lokiUid` | Data source UIDs for metrics and logs. |
 | `grafana.replyMode` | `dm` (default) sends analyses to `adminDmChannel` as a preview, `thread` replies under the alert, `off` disables it. |
 | `mcp.enabled` / `mcp.host` / `mcp.port` / `mcp.path` | MCP endpoint for Claude Code (default off, `127.0.0.1:8787/mcp`). |
-| `mcp.publicUrl` / `mcp.oauthRedirectUris` | Public HTTPS origin of the endpoint, which turns on OAuth sign-in for Claude app connectors, and the callback URLs clients may register (default: Claude's). |
+| `mcp.publicUrl` / `mcp.oauthRedirectUris` / `mcp.cimdOrigins` | Public HTTPS origin of the endpoint, which turns on OAuth sign-in for Claude app connectors; the callback URLs clients may register; and the origins whose client metadata documents may be fetched (defaults: Claude's). |
 | `usage.retentionMonths` | Months of usage logs to keep (default 12). |
 | `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |

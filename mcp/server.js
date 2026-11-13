@@ -202,7 +202,7 @@ export function startMcpServer(logger, slack) {
           return;
         }
         if (pathname === '/authorize' && req.method === 'GET') {
-          const r = startAuthorization(url.searchParams);
+          const r = await startAuthorization(url.searchParams);
           if (!r.ok) {
             if (r.redirect) res.writeHead(302, { Location: r.redirect }).end();
             else res.writeHead(r.status, { 'Content-Type': 'text/plain' }).end(r.error);

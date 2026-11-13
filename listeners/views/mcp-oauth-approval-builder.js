@@ -10,12 +10,16 @@ export const DENY_ACTION = 'mcp_oauth_deny';
  */
 export function buildApprovalBlocks(request) {
   const callback = new URL(request.redirectUri).host;
+  // For CIMD clients the client_id URL's origin is verified; the name is self-asserted
+  const who = request.clientOrigin
+    ? `*${request.clientName}* (verified identity: \`${new URL(request.clientOrigin).host}\`)`
+    : `*${request.clientName}*`;
   return [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `:key: *${request.clientName}* wants to connect to Fenix's tools (read-only).\nApprove only if you just started this connection yourself.`,
+        text: `:key: ${who} wants to connect to Fenix's tools (read-only).\nApprove only if you just started this connection yourself.`,
       },
     },
     {

@@ -50,6 +50,8 @@ export function safeEqual(a, b) {
  * @property {string} name
  * @property {string[]} redirectUris
  * @property {number} createdAt
+ * @property {string} [origin] - CIMD clients: origin of the client_id URL, shown to the approver
+ * @property {number} [fetchedAt] - CIMD clients: when the metadata document was last read
  */
 
 /**
@@ -104,6 +106,123 @@ export function isAllowedRedirect(uri) {
   return config.mcp.oauthRedirectUris.includes(uri);
 }
 
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * Whether a requested redirect URI matches a registered one. Loopback http
+ * redirects (native clients such as Claude Code) match on any port, per
+ * RFC 8252 section 7.3; everything else must match exactly.
+ * @param {string} requested
+ * @param {string} registered
+ * @returns {boolean}
+ */
+export function redirectMatches(requested, registered) {
+  if (requested === registered) return true;
+  try {
+    const a = new URL(requested);
+    const b = new URL(registered);
+    return (
+      a.protocol === 'http:' &&
+      b.protocol === 'http:' &&
+      LOOPBACK_HOSTS.has(a.hostname) &&
+      a.hostname === b.hostname &&
+      a.pathname === b.pathname &&
+      a.search === b.search
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** How long a fetched client metadata document is trusted before it is read again. */
+const CIMD_MAX_AGE_SEC = 60 * 60;
+const CIMD_TIMEOUT_MS = 5000;
+const CIMD_MAX_BYTES = 10 * 1024;
+
+/**
+ * Whether a client_id is a Client ID Metadata Document URL Fenix may fetch:
+ * HTTPS, on an allowed origin, with a path. Limiting origins keeps the
+ * authorization server from fetching arbitrary URLs.
+ * @param {string} clientId
+ * @returns {boolean}
+ */
+export function isCimdClientId(clientId) {
+  try {
+    const url = new URL(clientId);
+    return url.protocol === 'https:' && url.pathname !== '/' && config.mcp.cimdOrigins.includes(url.origin);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fetch and validate a Client ID Metadata Document, then store the client.
+ * The document must name itself as client_id, be a public client, and list
+ * redirect URIs that are allowed (Claude's callbacks or loopback).
+ * @param {string} clientId
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<OAuthClient | null>}
+ */
+async function resolveCimdClient(clientId, fetchImpl = fetch) {
+  const res = await fetchImpl(clientId, {
+    headers: { Accept: 'application/json' },
+    redirect: 'error',
+    signal: AbortSignal.timeout(CIMD_TIMEOUT_MS),
+  });
+  if (!res.ok) return null;
+  const raw = await res.text();
+  if (raw.length > CIMD_MAX_BYTES) return null;
+  const doc = JSON.parse(raw);
+  if (doc?.client_id !== clientId) return null;
+  if (doc.token_endpoint_auth_method && doc.token_endpoint_auth_method !== 'none') return null;
+  const redirectUris = (Array.isArray(doc.redirect_uris) ? doc.redirect_uris : [])
+    .map(String)
+    .filter((/** @type {string} */ uri) => isAllowedRedirect(uri) || isLoopback(uri));
+  if (redirectUris.length === 0) return null;
+  const origin = new URL(clientId).origin;
+  /** @type {OAuthClient} */
+  const client = {
+    clientId,
+    secretHash: null,
+    name: String(doc.client_name || origin).slice(0, 80),
+    redirectUris,
+    createdAt: store.clients[clientId]?.createdAt ?? nowSec(),
+    origin,
+    fetchedAt: nowSec(),
+  };
+  store.clients[clientId] = client;
+  void save();
+  return client;
+}
+
+/** @param {string} uri */
+function isLoopback(uri) {
+  try {
+    const url = new URL(uri);
+    return url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The client for an /authorize request: a registered (DCR) client, or a CIMD
+ * client read from its metadata document (re-read when older than an hour).
+ * @param {string} clientId
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<OAuthClient | null>}
+ */
+async function resolveClient(clientId, fetchImpl) {
+  const known = store.clients[clientId];
+  if (!isCimdClientId(clientId)) return known || null;
+  if (known?.fetchedAt && nowSec() - known.fetchedAt < CIMD_MAX_AGE_SEC) return known;
+  try {
+    return await resolveCimdClient(clientId, fetchImpl);
+  } catch {
+    return null;
+  }
+}
+
 // ── Metadata ───────────────────────────────────────────────────────────
 
 /** RFC 9728 protected-resource metadata. */
@@ -129,6 +248,8 @@ export function authorizationServerMetadata() {
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
+    // Claude uses its published client identity (CIMD) when this and "none" are advertised
+    client_id_metadata_document_supported: true,
   };
 }
 
@@ -186,6 +307,7 @@ export function registerClient(body) {
  * @property {string} id
  * @property {string} clientId
  * @property {string} clientName
+ * @property {string | null} clientOrigin - CIMD clients: verified origin of the client_id URL
  * @property {string} redirectUri
  * @property {string} codeChallenge
  * @property {string | null} state
@@ -208,17 +330,19 @@ function prunePending() {
 /**
  * Validate an /authorize request and create a pending approval.
  * @param {URLSearchParams} params
- * @returns {{ ok: true, request: PendingRequest } | { ok: false, status: number, error: string, redirect?: string }}
+ * @param {typeof fetch} [fetchImpl] - Used to read Client ID Metadata Documents (tests inject one)
+ * @returns {Promise<{ ok: true, request: PendingRequest } | { ok: false, status: number, error: string, redirect?: string }>}
  */
-export function startAuthorization(params) {
+export async function startAuthorization(params, fetchImpl) {
   load();
   prunePending();
-  const client = store.clients[params.get('client_id') || ''];
+  const client = await resolveClient(params.get('client_id') || '', fetchImpl);
   const redirectUri = params.get('redirect_uri') || '';
   // Never redirect to an unverified URI: errors before this point are shown, not redirected
   if (!client) return { ok: false, status: 400, error: 'Unknown client. Remove and re-add the connector.' };
-  if (!client.redirectUris.includes(redirectUri))
+  if (!client.redirectUris.some((registered) => redirectMatches(redirectUri, registered))) {
     return { ok: false, status: 400, error: 'Redirect URI not registered.' };
+  }
 
   const state = params.get('state');
   /** @param {string} error */
@@ -240,6 +364,7 @@ export function startAuthorization(params) {
     id: randomToken(16),
     clientId: client.clientId,
     clientName: client.name,
+    clientOrigin: client.origin ?? null,
     redirectUri,
     codeChallenge,
     state,
