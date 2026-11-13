@@ -26,6 +26,25 @@ import {
 const getToken = createTokenReader('FENIX_MCP_TOKEN', '.fenix_mcp_token');
 /** Seconds between attempts to bind when the listen address is not available yet. */
 const RETRY_SEC = 30;
+/** Paths left out of the request log: health checks and the sign-in page's status polling. */
+const QUIET_PATHS = new Set(['/healthz', '/authorize/status']);
+
+/**
+ * A header or parameter value made safe for a single log line.
+ * @param {unknown} value
+ * @returns {string}
+ */
+const logSafe = (value) =>
+  String(value ?? '-')
+    .replace(/[^\x20-\x7e]|"/g, '')
+    .slice(0, 120);
+
+/**
+ * The OAuth error code from a response body, for the request log.
+ * @param {any} body
+ * @returns {string}
+ */
+const oauthErrorDetail = (body) => (body?.error ? ` error=${logSafe(body.error)}` : '');
 
 const INSTRUCTIONS =
   'Fenix is the team DevOps assistant. Use these tools for CI builds and test failures (TeamCity), flaky tests, ' +
@@ -178,6 +197,15 @@ export function startMcpServer(logger, slack) {
   const http = createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost');
     const { pathname } = url;
+    const started = Date.now();
+    /** Extra detail for the request log (client id, error code); never tokens or the query string. */
+    let detail = '';
+    res.on('finish', () => {
+      if (QUIET_PATHS.has(pathname)) return;
+      logger.info(
+        `MCP ${req.method} ${pathname} ${res.statusCode} ${Date.now() - started}ms ua="${logSafe(req.headers['user-agent'])}"${detail}`,
+      );
+    });
     try {
       if (pathname === '/healthz') {
         res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok');
@@ -198,11 +226,13 @@ export function startMcpServer(logger, slack) {
         }
         if (pathname === '/register' && req.method === 'POST') {
           const r = registerClient(JSON.parse((await readBody(req)) || '{}'));
+          detail = oauthErrorDetail(r.body);
           sendJson(res, r.status, r.body);
           return;
         }
         if (pathname === '/authorize' && req.method === 'GET') {
           const r = await startAuthorization(url.searchParams);
+          detail = ` client="${logSafe(url.searchParams.get('client_id'))}"${r.ok ? '' : ` error="${logSafe(r.error)}"`}`;
           if (!r.ok) {
             if (r.redirect) res.writeHead(302, { Location: r.redirect }).end();
             else res.writeHead(r.status, { 'Content-Type': 'text/plain' }).end(r.error);
@@ -224,6 +254,7 @@ export function startMcpServer(logger, slack) {
             ? new URLSearchParams(JSON.parse(raw || '{}'))
             : new URLSearchParams(raw);
           const r = exchangeToken(form, req.headers.authorization);
+          detail = ` grant=${logSafe(form.get('grant_type'))}${oauthErrorDetail(r.body)}`;
           sendJson(res, r.status, r.body);
           return;
         }

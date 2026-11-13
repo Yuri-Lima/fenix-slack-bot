@@ -18,6 +18,8 @@ describe('MCP OAuth sign-in with Slack approval', () => {
   /** @type {import('node:http').Server} */
   let http;
   let base;
+  /** @type {string[]} */
+  const logLines = [];
   const slack = {
     chat: {
       postMessage: mock.fn(async () => ({ ok: true })),
@@ -27,7 +29,7 @@ describe('MCP OAuth sign-in with Slack approval', () => {
 
   before(async () => {
     config.mcp = { ...config.mcp, enabled: true, host: '127.0.0.1', port: 0 };
-    http = startMcpServer({ info: () => {}, error: () => {} }, slack);
+    http = startMcpServer({ info: (m) => logLines.push(m), error: () => {} }, slack);
     await new Promise((resolve) => http.once('listening', resolve));
     base = `http://127.0.0.1:${http.address().port}`;
   });
@@ -206,6 +208,31 @@ describe('MCP OAuth sign-in with Slack approval', () => {
       headers: { Authorization: `Bearer ${refreshed.access_token}` },
     });
     assert.strictEqual(afterRevoke.status, 401);
+  });
+
+  it('logs each sign-in step without codes, verifiers or tokens', async () => {
+    logLines.length = 0;
+    const { clientId, verifier, redirect } = await signIn();
+    const code = redirect.searchParams.get('code');
+    const res = await token({
+      grant_type: 'authorization_code',
+      client_id: clientId,
+      code,
+      redirect_uri: CALLBACK,
+      code_verifier: verifier,
+    });
+    const { access_token: accessToken } = await res.json();
+    await fetch(`${base}/mcp`, { method: 'POST', headers: { 'User-Agent': 'Claude-User "x"\n' } });
+    await fetch(`${base}/authorize?client_id=unknown&code_challenge=c`);
+
+    const log = logLines.join('\n');
+    assert.match(log, /MCP POST \/register 201 /);
+    assert.match(log, new RegExp(`MCP GET /authorize 200 .* client="${clientId}"`));
+    assert.match(log, /MCP POST \/token 200 .* grant=authorization_code/);
+    assert.match(log, /MCP POST \/mcp 401 \d+ms ua="Claude-User x"/);
+    assert.match(log, /MCP GET \/authorize 400 .* client="unknown" error="Unknown client/);
+    assert.ok(!log.includes('/authorize/status'), 'status polling stays out of the log');
+    for (const secret of [code, verifier, accessToken, 'state=']) assert.ok(!log.includes(secret));
   });
 
   it('keeps accepting the static token used by Claude Code', async () => {
