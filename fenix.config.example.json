@@ -33,5 +33,11 @@
     "lokiUid": "loki",
     "replyMode": "dm"
   },
-  "timeZone": "Europe/Berlin"
+  "timeZone": "Europe/Berlin",
+  "mcp": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8787,
+    "path": "/mcp"
+  }
 }

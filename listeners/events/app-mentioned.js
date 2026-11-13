@@ -17,11 +17,13 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     const threadTs = event.thread_ts || event.ts;
 
     const cleanedText = text.replace(/<@[A-Z0-9]+>/g, '').trim();
+    // App mentions always come from a user; '' never matches an owner
+    const userId = event.user ?? '';
 
     // `@Fenix delete` removes the bot's messages from the thread. Owner-only;
     // anyone else sending it is ignored without a reply.
     if (isDeleteCommand(cleanedText)) {
-      if (!isWhitelisted(event.user)) return;
+      if (!isWhitelisted(userId)) return;
       await handleDeleteCommand({ client, event, botUserId: context.botUserId, botId: context.botId, logger });
       return;
     }
@@ -29,14 +31,14 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     // `@Fenix report [period]`: usage report built in code (no AI tokens). Owner-only.
     const reportPeriod = parseReportCommand(cleanedText);
     if (reportPeriod !== null) {
-      if (!isWhitelisted(event.user)) return;
+      if (!isWhitelisted(userId)) return;
       await handleReportCommand({ client, channel: channelId, threadTs, periodArg: reportPeriod });
       return;
     }
 
     // Input guard + access gate: non-owners get a guard warning or the
     // access-denied reply instead of the agent
-    const gate = gateRequest(event.user, cleanedText);
+    const gate = gateRequest(userId, cleanedText);
     if (gate) {
       if (gate.verdict !== 'clean') {
         logger.warn(

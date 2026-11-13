@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { compact } from '../utils/helpers.js';
 import { lokiInstant, lokiRange, promQuery, promRange } from './grafana.js';
 
 // Evidence about one host over a time window, gathered from Prometheus
@@ -350,6 +351,45 @@ export const VERDICT_STATUS = {
  */
 
 /**
+ * When a server last sent host metrics within the past `days`, or null if it never did
+ * (an unknown name, or gone for longer).
+ * @param {string} host
+ * @param {number} days
+ * @returns {Promise<number | null>} unix seconds
+ */
+export async function lastSeenWithin(host, days) {
+  const res = await settle(promQuery(`max_over_time(timestamp(node_load1{instance="${q(host)}"})[${days}d:5m])`));
+  return res?.[0] ? Number(res[0].value[1]) : null;
+}
+
+/** Above these, a value is worth reporting in an on-demand check (alerts already decided that for themselves). */
+const NOTABLE = { loadPerCpu: 1, memUsedPct: 85, swapGrowthMb: 100, diskUsedPct: 80, diskDaysToFull: 14 };
+
+/**
+ * Which verdict kinds are worth reporting when nobody asked about a specific
+ * alert, e.g. "how is web-01 doing?". An unreachable server is always notable.
+ * @param {HostEvidence} e
+ * @returns {AlertKind[]}
+ */
+export function notableKinds(e) {
+  if (e.reachability.nodeUp === false) return ['health'];
+  /** @type {AlertKind[]} */
+  const kinds = [];
+  if (e.load1 && e.cpus && e.load1.max / e.cpus > NOTABLE.loadPerCpu) kinds.push('load');
+  const swapGrowth = e.swap ? e.swap.endMb - e.swap.startMb : 0;
+  if ((e.memUsedPctMax ?? 0) >= NOTABLE.memUsedPct || swapGrowth > NOTABLE.swapGrowthMb) kinds.push('memory');
+  if (
+    e.filesystems.some(
+      (f) => f.usedPct >= NOTABLE.diskUsedPct || (f.daysToFull !== null && f.daysToFull < NOTABLE.diskDaysToFull),
+    )
+  ) {
+    kinds.push('disk');
+  }
+  if (e.healthChecks.some((c) => c.minInWindow === 0) || e.reachability.exporterUp === false) kinds.push('health');
+  return kinds;
+}
+
+/**
  * Plain-language verdict for an alert, from the evidence.
  * @param {AlertKind} kind
  * @param {HostEvidence} e
@@ -515,4 +555,69 @@ export function clock(sec) {
     minute: '2-digit',
     timeZone: config.timeZone,
   });
+}
+
+/**
+ * Metric fields for the two-column grid. One emoji per kind of metric, always the same.
+ * @param {HostEvidence} e
+ * @param {AlertKind} kind
+ * @returns {string[]} mrkdwn field texts
+ */
+export function evidenceFields(e, kind) {
+  const fields = [];
+  const reachable = e.reachability.nodeUp !== false;
+  if (!reachable) {
+    fields.push(
+      `:electric_plug: *Last seen*\n${e.reachability.nodeLastSeen ? clock(e.reachability.nodeLastSeen) : 'not in this window'}`,
+    );
+  }
+  if (reachable && e.cpu && e.cpus) {
+    const extra = [
+      e.cpu.iowait >= 0.05 && `disk wait ${pct(e.cpu.iowait)}`,
+      e.cpu.steal >= 0.05 && `steal ${pct(e.cpu.steal)}`,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    fields.push(`:brain: *CPU*\n${pct(1 - e.cpu.idle)} busy of ${e.cpus} cores${extra ? ` · ${extra}` : ''}`);
+  }
+  if (reachable && e.load1) {
+    fields.push(
+      `:chart_with_upwards_trend: *Load*\npeak ${e.load1.max.toFixed(1)} at ${clock(e.load1.at)} · ${e.procsRunningMax ?? '?'} running`,
+    );
+  }
+  if (reachable && e.memUsedPctMax !== null) {
+    const swapDelta = e.swap ? Math.round(e.swap.endMb - e.swap.startMb) : null;
+    const swap =
+      swapDelta === null
+        ? ''
+        : ` · swap ${Math.abs(swapDelta) < 20 ? 'flat' : `${swapDelta > 0 ? '+' : ''}${swapDelta} MB`}`;
+    fields.push(`:floppy_disk: *Memory*\n${Math.round(e.memUsedPctMax)}% used${swap}`);
+  }
+  if (reachable && (e.diskBusyPctMax !== null || e.filesystems.length)) {
+    const fullest = [...e.filesystems].sort((a, b) => b.usedPct - a.usedPct)[0];
+    const parts = [
+      e.diskBusyPctMax !== null && `busy ${Math.round(e.diskBusyPctMax)}%`,
+      fullest &&
+        (kind === 'disk' || fullest.usedPct >= 80 ? `\`${fullest.mount}\` ${Math.round(fullest.usedPct)}% full` : null),
+    ].filter(Boolean);
+    if (parts.length) fields.push(`:minidisc: *Disk*\n${parts.join(' · ')}`);
+  }
+  // Health values are stale when the exporter that reports them is down
+  if (e.healthChecks.length && e.reachability.exporterUp !== false) {
+    const down = e.healthChecks.filter((c) => c.minInWindow === 0);
+    fields.push(
+      `:stethoscope: *Phoenix checks*\n${
+        down.length
+          ? down.map((c) => `\`${c.check}\` ${c.now === 0 ? 'down' : 'recovered'}`).join(', ')
+          : `all ${e.healthChecks.length} healthy`
+      }`,
+    );
+  } else if (e.reachability.exporterUp === false) {
+    fields.push(':stethoscope: *Phoenix checks*\nexporter not answering');
+  }
+  if (e.logs) {
+    const total = Object.values(e.logs.byService).reduce((a, b) => a + b, 0);
+    fields.push(`:scroll: *Logs*\n${compact(total)} lines · ${e.logs.errorCount} errors`);
+  }
+  return fields;
 }

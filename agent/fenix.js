@@ -14,9 +14,9 @@ import {
 } from '../utils/feedback-store.js';
 import { textResult } from '../utils/helpers.js';
 import { isWhitelisted } from '../utils/input-guard.js';
-import { formatUsageSummary, usageStatsFor } from '../utils/usage-report.js';
 import { recordUsage } from '../utils/usage-store.js';
 import { ALL_TOOLS } from './tools/index.js';
+import { usageReportTool } from './tools/usage.js';
 
 const MAX_CONCURRENT_AGENTS = 3;
 const AGENT_TIMEOUT_MS = 120_000;
@@ -424,23 +424,6 @@ export async function runFenixAgent(text, sessionId, deps) {
         } catch (e) {
           return textResult(`Failed to get stats: ${/** @type {any} */ (e).message}`, true);
         }
-      },
-    );
-
-    const usageReportTool = tool(
-      'usage_report',
-      "Fenix's own AI usage: replies, tokens, cost, models, users, tools, reply times. Admin only. " +
-        'Returns a finished summary; for the full visual report the user can send `report`.',
-      {
-        period: z
-          .string()
-          .optional()
-          .describe("'month' (default), 'last-month', '7d', '24h', or a month like '2026-10'"),
-      },
-      async ({ period }) => {
-        const stats = usageStatsFor(period || '');
-        if (!stats) return textResult(`Unknown period "${period}". Use month, last-month, 7d, 24h or YYYY-MM.`, true);
-        return textResult(formatUsageSummary(stats));
       },
     );
 

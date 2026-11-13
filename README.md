@@ -43,6 +43,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
 | 📝 | **"Create YouTrack Ticket" shortcut** | Message shortcut that turns any Slack message (and its surrounding context) into a pre-filled ticket. |
 | 📊 | **Usage tracking** | Every agent reply ends with its model, tokens, cost and steps, plus the month to date. Every run is logged to a monthly file, and `report` gives a full usage report computed in code (no AI tokens). |
+| 🔌 | **Claude Code connection (MCP)** | An authenticated MCP endpoint serves Fenix's read-only tools (TeamCity, flaky tests, server health, codebase, YouTrack search, usage) to Claude Code. All service tokens stay on the Fenix server. |
 | 🧹 | **Thread cleanup** | `@Fenix delete` removes every message Fenix posted in a thread. |
 | 💬 | **Feedback loop** | 👍/👎 buttons on every answer plus conversational feedback capture, stored for the owner to review. |
 | 🛡️ | **Guardrails** | Owner allowlist, prompt-injection and credential-probing detection with strikes, a strict tool allowlist, and redaction rules. |
@@ -229,6 +230,27 @@ Reports cost no tokens: `report` aggregates the log in code and renders a Block 
 language ("how much did we spend this week?") uses the owner-only `usage_report` tool, which hands the model only
 the finished summary.
 
+## Claude Code (MCP)
+
+Fenix can serve its tools to Claude Code over MCP (Streamable HTTP), so any Claude Code session can ask about builds,
+flaky tests, server health, the codebase, YouTrack issues, or Fenix's own usage, while every service token stays on
+the Fenix server.
+
+- **Read-only by design:** `READ_ONLY_TOOLS` in `agent/tools/index.js` lists what is exposed (18 tools). YouTrack
+  create/update and Slack-bound tools are excluded, and every tool is marked `readOnlyHint`.
+- **One definition per tool:** the endpoint registers the same tool objects the Slack agent uses.
+- **Authenticated:** requests need `Authorization: Bearer <FENIX_MCP_TOKEN>` (constant-time check); anything else
+  gets `401`. The server is stateless (a fresh MCP server per POST) and refuses to start without a token.
+- **Logged:** every call is recorded in the usage log as `kind: "mcp"` with the tool name, outcome, and duration.
+
+Enable it in `fenix.config.json` (`mcp.enabled`, `mcp.host`, `mcp.port`, `mcp.path`) and put it behind your HTTPS
+reverse proxy; bind it to an address the proxy can reach but the internet cannot (for example Docker's host
+gateway). If the address does not exist yet at boot, Fenix retries every 30 s instead of failing. Then:
+
+```sh
+claude mcp add --transport http fenix https://<your-fenix-domain>/mcp --header "Authorization: Bearer $(cat ~/.fenix_mcp_token)"
+```
+
 ## Architecture
 
 ```mermaid
@@ -280,6 +302,7 @@ so the source stays generic.
 | `TEAMCITY_TOKEN` | For CI features | TeamCity access token. |
 | `YOUTRACK_API_TOKEN` | For YouTrack features | YouTrack permanent token. |
 | `GITLAB_TOKEN` | For codebase features | GitLab token with `read_api`. |
+| `FENIX_MCP_TOKEN` | For the MCP endpoint | Long random bearer token Claude Code must send (`openssl rand -hex 32`). |
 | `GRAFANA_TOKEN` | For Grafana alert analysis | Grafana service-account token with the **Viewer** role. |
 | `SLACK_USER_TOKEN` | Optional | User token (`xoxp-…`) so the ticket shortcut can read DM context. |
 | `FENIX_CONFIG` | Optional | Path to the config file (default `fenix.config.json`). |
@@ -307,6 +330,7 @@ cp fenix.config.example.json fenix.config.json
 | `grafana.url` / `grafana.botId` | Grafana base URL and the Slack bot ID of the Grafana app, whose alert posts trigger the analysis. |
 | `grafana.prometheusUid` / `grafana.lokiUid` | Data source UIDs for metrics and logs. |
 | `grafana.replyMode` | `dm` (default) sends analyses to `adminDmChannel` as a preview, `thread` replies under the alert, `off` disables it. |
+| `mcp.enabled` / `mcp.host` / `mcp.port` / `mcp.path` | MCP endpoint for Claude Code (default off, `127.0.0.1:8787/mcp`). |
 | `usage.retentionMonths` | Months of usage logs to keep (default 12). |
 | `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |
@@ -400,6 +424,7 @@ WantedBy=multi-user.target
 .
 ├── app.js                       # Bolt app (Socket Mode) entry point
 ├── config.js                    # Loads fenix.config.json
+├── mcp/                         # MCP endpoint for Claude Code (read-only tools)
 ├── integrations/                # TeamCity, YouTrack, GitLab API clients and TeamCity test history
 ├── agent/
 │   ├── fenix.js                 # Agent runner, system prompt, Slack-bound tools

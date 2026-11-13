@@ -1,5 +1,8 @@
 import { config } from '../config.js';
+import { compact, money } from './helpers.js';
 import { readRange, totalTokens } from './usage-store.js';
+
+export { compact, money };
 
 // Turns the usage log into footers and reports. Everything here is computed in
 // code, so a report costs no LLM tokens no matter how much history it covers.
@@ -13,26 +16,6 @@ import { readRange, totalTokens } from './usage-store.js';
  */
 export function shortModel(model) {
   return model.replace(/^claude-/, '').replace(/-\d{8}$/, '');
-}
-
-/**
- * 845 -> `845`, 12345 -> `12.3k`, 1234567 -> `1.23M`
- * @param {number} n
- * @returns {string}
- */
-export function compact(n) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k`;
-  return String(Math.round(n));
-}
-
-/**
- * @param {number} usd
- * @returns {string}
- */
-export function money(usd) {
-  if (usd > 0 && usd < 0.01) return '<$0.01';
-  return `$${usd.toFixed(2)}`;
 }
 
 /**

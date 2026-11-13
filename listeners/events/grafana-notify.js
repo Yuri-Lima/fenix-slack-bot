@@ -1,5 +1,11 @@
 import { config } from '../../config.js';
-import { alertKind, clock, collectHostEvidence, diagnose, VERDICT_STATUS } from '../../integrations/host-health.js';
+import {
+  alertKind,
+  collectHostEvidence,
+  diagnose,
+  evidenceFields,
+  VERDICT_STATUS,
+} from '../../integrations/host-health.js';
 import { andMore } from '../../utils/helpers.js';
 import { recordUsage, ruleBasedRun } from '../../utils/usage-store.js';
 
@@ -157,76 +163,6 @@ const ordinal = (n) => {
   const v = n % 100;
   return `${n}${suffixes[(v - 20) % 10] || suffixes[v] || suffixes[0]}`;
 };
-/** @param {number} share */
-const pct = (share) => `${Math.round(share * 100)}%`;
-/** @param {number} n */
-const compact = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n));
-
-/**
- * Metric fields for the two-column grid. One emoji per kind of metric, always the same.
- * @param {import('../../integrations/host-health.js').HostEvidence} e
- * @param {import('../../integrations/host-health.js').AlertKind} kind
- * @returns {string[]} mrkdwn field texts
- */
-export function evidenceFields(e, kind) {
-  const fields = [];
-  const reachable = e.reachability.nodeUp !== false;
-  if (!reachable) {
-    fields.push(
-      `:electric_plug: *Last seen*\n${e.reachability.nodeLastSeen ? clock(e.reachability.nodeLastSeen) : 'not in this window'}`,
-    );
-  }
-  if (reachable && e.cpu && e.cpus) {
-    const extra = [
-      e.cpu.iowait >= 0.05 && `disk wait ${pct(e.cpu.iowait)}`,
-      e.cpu.steal >= 0.05 && `steal ${pct(e.cpu.steal)}`,
-    ]
-      .filter(Boolean)
-      .join(' · ');
-    fields.push(`:brain: *CPU*\n${pct(1 - e.cpu.idle)} busy of ${e.cpus} cores${extra ? ` · ${extra}` : ''}`);
-  }
-  if (reachable && e.load1) {
-    fields.push(
-      `:chart_with_upwards_trend: *Load*\npeak ${e.load1.max.toFixed(1)} at ${clock(e.load1.at)} · ${e.procsRunningMax ?? '?'} running`,
-    );
-  }
-  if (reachable && e.memUsedPctMax !== null) {
-    const swapDelta = e.swap ? Math.round(e.swap.endMb - e.swap.startMb) : null;
-    const swap =
-      swapDelta === null
-        ? ''
-        : ` · swap ${Math.abs(swapDelta) < 20 ? 'flat' : `${swapDelta > 0 ? '+' : ''}${swapDelta} MB`}`;
-    fields.push(`:floppy_disk: *Memory*\n${Math.round(e.memUsedPctMax)}% used${swap}`);
-  }
-  if (reachable && (e.diskBusyPctMax !== null || e.filesystems.length)) {
-    const fullest = [...e.filesystems].sort((a, b) => b.usedPct - a.usedPct)[0];
-    const parts = [
-      e.diskBusyPctMax !== null && `busy ${Math.round(e.diskBusyPctMax)}%`,
-      fullest &&
-        (kind === 'disk' || fullest.usedPct >= 80 ? `\`${fullest.mount}\` ${Math.round(fullest.usedPct)}% full` : null),
-    ].filter(Boolean);
-    if (parts.length) fields.push(`:minidisc: *Disk*\n${parts.join(' · ')}`);
-  }
-  // Health values are stale when the exporter that reports them is down
-  if (e.healthChecks.length && e.reachability.exporterUp !== false) {
-    const down = e.healthChecks.filter((c) => c.minInWindow === 0);
-    fields.push(
-      `:stethoscope: *Phoenix checks*\n${
-        down.length
-          ? down.map((c) => `\`${c.check}\` ${c.now === 0 ? 'down' : 'recovered'}`).join(', ')
-          : `all ${e.healthChecks.length} healthy`
-      }`,
-    );
-  } else if (e.reachability.exporterUp === false) {
-    fields.push(':stethoscope: *Phoenix checks*\nexporter not answering');
-  }
-  if (e.logs) {
-    const total = Object.values(e.logs.byService).reduce((a, b) => a + b, 0);
-    fields.push(`:scroll: *Logs*\n${compact(total)} lines · ${e.logs.errorCount} errors`);
-  }
-  return fields;
-}
-
 /** @typedef {import('@slack/types').KnownBlock} Block */
 
 /** @param {string} text */

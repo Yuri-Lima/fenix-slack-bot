@@ -23,6 +23,7 @@ npm start
 | `TEAMCITY_TOKEN` | TeamCity access token (or `~/.teamcity_token`) |
 | `GITLAB_TOKEN` | GitLab read token (or `~/.gitlab_token`) |
 | `GRAFANA_TOKEN` | Grafana Viewer service-account token (or `~/.grafana_token`) |
+| `FENIX_MCP_TOKEN` | Bearer token for the MCP endpoint (or `~/.fenix_mcp_token`) |
 | `YOUTRACK_API_TOKEN` | YouTrack permanent token (or `~/.youtrack_token`) |
 | `SLACK_USER_TOKEN` | Optional user token (`xoxp-`) for the YouTrack shortcut's DM context (or `~/.slack_user_token`) |
 | `FENIX_CONFIG` | Path to the config file (default `fenix.config.json`) |
@@ -98,6 +99,10 @@ Tool handlers return `textResult(message, true)` from every `catch`, so the agen
 ### Usage Tracking
 
 Every run is recorded through `utils/usage-store.js`: `runFenixAgent()` records agent runs (including busy, timeout and error outcomes) from the SDK result's `modelUsage`, `total_cost_usd`, `num_turns` and `duration_ms`; rule-based analyses record `ruleBasedRun()` with zero tokens. Logs rotate monthly (`data/usage/YYYY-MM.jsonl`, append-only, retention `usage.retentionMonths`). Never store message text. Reports are aggregated in code (`utils/usage-report.js`, `listeners/views/usage-report-builder.js`); never send raw usage records to the model.
+
+### MCP Endpoint
+
+`mcp/server.js` serves `READ_ONLY_TOOLS` (from `agent/tools/index.js`) to Claude Code over Streamable HTTP, stateless, behind `FENIX_MCP_TOKEN`. It registers the same tool objects the agent uses; never re-implement a tool for MCP. Only add a tool to `READ_ONLY_TOOLS` if it cannot change anything.
 
 ### Tool Definitions
 

@@ -24,7 +24,7 @@ mkdirSync(USAGE_DIR, { recursive: true });
 /**
  * @typedef {Object} UsageRecord
  * @property {string} ts - ISO time the run finished
- * @property {'agent' | 'grafana' | 'teamcity'} kind
+ * @property {'agent' | 'grafana' | 'teamcity' | 'mcp'} kind - mcp: a tool call from Claude Code (its tokens are Claude Code's, not Fenix's)
  * @property {'ok' | 'error' | 'timeout' | 'busy'} outcome
  * @property {string} [userId]
  * @property {string} [userName]
@@ -74,8 +74,8 @@ export function pruneOldMonths(currentMonth) {
 
 /**
  * Usage record for a rule-based analysis (no LLM, so no tokens or cost).
- * @param {'grafana' | 'teamcity'} kind
- * @param {string} subject - Non-content label, e.g. the alert rule or build configuration
+ * @param {'grafana' | 'teamcity' | 'mcp'} kind
+ * @param {string} subject - Non-content label, e.g. the alert rule, build configuration, or tool name
  * @param {number} startedAt - Date.now() when the analysis began
  * @returns {Omit<UsageRecord, 'ts'>}
  */

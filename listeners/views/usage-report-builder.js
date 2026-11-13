@@ -2,6 +2,9 @@ import { compact, money } from '../../utils/usage-report.js';
 
 /** @typedef {import('@slack/types').KnownBlock} Block */
 
+/** Display names for runs that use no Fenix AI tokens. */
+const ANALYSIS_LABELS = { grafana: 'Grafana alerts', teamcity: 'TeamCity builds', mcp: 'Claude Code (MCP) calls' };
+
 /** @param {string} text */
 const section = (text) => /** @type {Block} */ ({ type: 'section', text: { type: 'mrkdwn', text } });
 /** @param {string} text */
@@ -115,12 +118,12 @@ export function buildUsageReportBlocks(s) {
   }
 
   const analyses = Object.entries(s.analyses)
-    .map(([k, v]) => `${k === 'grafana' ? 'Grafana' : k === 'teamcity' ? 'TeamCity' : k} ${v}`)
+    .map(([k, v]) => `${ANALYSIS_LABELS[k] || k} ${v}`)
     .join(' · ');
   blocks.push(
     { type: 'divider' },
     context(
-      `:gear: Rule-based analyses (no AI tokens): ${analyses || 'none'}  ·  Report computed from the usage log, 0 AI tokens`,
+      `:gear: Runs without Fenix AI tokens: ${analyses || 'none'}  ·  Report computed from the usage log, 0 AI tokens`,
     ),
   );
   return blocks;
