@@ -181,8 +181,9 @@ firing host (up to three per message) it then pulls, read-only through a Grafana
   (pool exhausted, timeouts, connection resets) linked to the verdict.
 - **Recurrence:** how often the same rule fired for the host in the last 24 hours and 7 days.
 
-Each host gets a compact Block Kit card. A status emoji in the header says how urgent it is (🔴 down,
-🟠 needs action, 🟡 worth a look, 🟢 false alarm), and each metric always uses the same icon:
+Each host gets a compact Block Kit card inside a Slack attachment, so its **left bar is coloured by status**,
+matching the status emoji in the header (🔴 down, 🟠 needs action, 🟡 worth a look, 🟢 false alarm; grey for
+fleet-wide events). Each metric always uses the same icon:
 
 ```text
 🟢 app-01 · Not real CPU pressure
@@ -196,7 +197,10 @@ Load 12.6 on 2 CPUs (629%), but the CPU was 86% idle. Tasks were waiting, not co
 ⚠️ Top errors
 > 10× phx-app  recv() failed (Connection reset by peer) while reading response header …
 👉 Next step: Change the rule to measure CPU use instead of load average.
+⚙️ Rule-based analysis of Grafana metrics and logs · no AI model, 0 tokens · 1.3 s
 ```
+
+The footer is honest about cost: the analysis is deterministic code over Grafana data, so it never calls an LLM.
 
 Five or more hosts in one alert line are treated as one fleet-wide event (network, monitoring, or a shared
 dependency) instead of separate problems. Messages that only report recoveries get no reply.

@@ -1,8 +1,6 @@
 {
   "teamName": "the Acme platform team",
-  "ownerIds": [
-    "U0123456789"
-  ],
+  "ownerIds": ["U0123456789"],
   "ownerName": "Jane",
   "adminDmChannel": "D0123456789",
   "teamcity": {

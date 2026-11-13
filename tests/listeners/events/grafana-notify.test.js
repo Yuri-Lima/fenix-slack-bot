@@ -104,8 +104,9 @@ describe('targetHost', () => {
 });
 
 /** All visible text of a Block Kit message, for matching. */
+const blocksOf = (out) => out.attachments.flatMap((a) => a.blocks);
 const render = (out) =>
-  out.blocks
+  blocksOf(out)
     .map((b) =>
       [b.text?.text, ...(b.fields || []).map((f) => f.text), ...(b.elements || []).map((el) => el.text)]
         .filter(Boolean)
@@ -139,8 +140,11 @@ describe('formatGrafanaAnalysis', () => {
       alert,
       [{ entry: alert.entries[0], host: 'alpha', evidence }],
       new Map([['alpha', { day: 2, week: 11 }]]),
+      { elapsedMs: 1340 },
     );
-    const header = out.blocks.find((b) => b.type === 'header');
+    assert.strictEqual(out.attachments.length, 1);
+    assert.strictEqual(out.attachments[0].color, '#2EB67D');
+    const header = blocksOf(out).find((b) => b.type === 'header');
     assert.strictEqual(header.text.text, ':large_green_circle: alpha · Not real CPU pressure');
     const text = render(out);
     assert.match(text, /since 08:25 {2}· {2}:repeat: 3rd time in 24 h · 12× in 7 days/);
@@ -148,11 +152,17 @@ describe('formatGrafanaAnalysis', () => {
     assert.match(text, /:point_right: \*Next step:\*/);
     assert.match(text, /`beta` recovered at 08:20 after 15 min/);
     assert.match(out.text, /alpha: Not real CPU pressure \(False alarm\)/);
+    const footer = blocksOf(out).at(-1).elements[0].text;
+    assert.strictEqual(
+      footer,
+      ':gear: Rule-based analysis of Grafana metrics and logs · no AI model, 0 tokens · 1.3 s',
+    );
   });
 
   it('reports a fleet-wide event as one central cause', () => {
     const out = formatGrafanaAnalysis(parseGrafanaAlert(fleet), [], new Map());
-    assert.strictEqual(out.blocks[0].text.text, ':globe_with_meridians: 7 servers failing at once');
+    assert.strictEqual(out.attachments[0].color, '#6E7681');
+    assert.strictEqual(out.attachments[0].blocks[0].text.text, ':globe_with_meridians: 7 servers failing at once');
     assert.match(render(out), /one shared cause/);
   });
 

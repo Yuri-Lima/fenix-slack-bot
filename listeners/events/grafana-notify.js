@@ -233,18 +233,32 @@ const context = (text) => /** @type {Block} */ ({ type: 'context', elements: [{ 
 /** @param {string} text */
 const section = (text) => /** @type {Block} */ ({ type: 'section', text: { type: 'mrkdwn', text } });
 
+/** Bar colour for cards without a verdict (fleet-wide events, missing data). */
+const NEUTRAL_COLOR = '#6E7681';
+
+/** @typedef {{ color: string, blocks: Block[] }} Card */
+
 /**
- * Build the analysis for one Grafana notification as Block Kit blocks, plus a
- * plain-text fallback for notifications and clients without blocks.
+ * Build the analysis for one Grafana notification: one card per finding, each a
+ * Slack attachment whose left bar shows the verdict status, plus a plain-text
+ * fallback for notifications.
  * @param {ParsedAlert} alert
  * @param {Array<{ entry: AlertEntry, host: string, evidence: import('../../integrations/host-health.js').HostEvidence | null }>} analysed
  * @param {Map<string, { day: number, week: number }>} history
- * @returns {{ text: string, blocks: Block[] } | null}
+ * @param {{ elapsedMs?: number }} [run] - How long the analysis took, for the footer
+ * @returns {{ text: string, attachments: Card[] } | null}
  */
-export function formatGrafanaAnalysis(alert, analysed, history) {
+export function formatGrafanaAnalysis(alert, analysed, history, run = {}) {
   const kind = alertKind(alert.rule);
-  /** @type {Block[]} */
-  const blocks = [];
+  /** @type {Card[]} */
+  const cards = [];
+  /** @param {string} color */
+  const newCard = (color) => {
+    /** @type {Block[]} */
+    const blocks = [];
+    cards.push({ color, blocks });
+    return blocks;
+  };
   /** @type {string[]} */
   const summary = [];
 
@@ -256,7 +270,7 @@ export function formatGrafanaAnalysis(alert, analysed, history) {
       .join(', ');
     const more = entry.hosts.length > 6 ? ` and ${entry.hosts.length - 6} more` : '';
     const title = `${entry.hosts.length} servers ${firing ? 'failing' : 'recovered'} at once`;
-    if (blocks.length) blocks.push({ type: 'divider' });
+    const blocks = newCard(NEUTRAL_COLOR);
     blocks.push(
       { type: 'header', text: { type: 'plain_text', text: `:globe_with_meridians: ${title}`, emoji: true } },
       context(`*${alert.rule}*${entry.shownTime ? `  ·  :clock3: ${entry.shownTime}` : ''}`),
@@ -278,10 +292,8 @@ export function formatGrafanaAnalysis(alert, analysed, history) {
         ? `:repeat: ${ordinal(seen.day + 1)} time in 24 h · ${seen.week + 1}× in ${HISTORY_DAYS} days`
         : ':new: first time this week';
     const meta = `*${alert.rule}*  ·  :clock3: since ${entry.shownTime ?? '?'}  ·  ${repeat}`;
-    if (blocks.length) blocks.push({ type: 'divider' });
-
     if (!evidence) {
-      blocks.push(
+      newCard(NEUTRAL_COLOR).push(
         { type: 'header', text: { type: 'plain_text', text: `:grey_question: ${host} · no data`, emoji: true } },
         context(meta),
         section('Could not load metrics for this server from Grafana.'),
@@ -292,6 +304,7 @@ export function formatGrafanaAnalysis(alert, analysed, history) {
 
     const v = diagnose(kind, evidence);
     const status = VERDICT_STATUS[v.status];
+    const blocks = newCard(status.color);
     blocks.push(
       {
         type: 'header',
@@ -319,23 +332,27 @@ export function formatGrafanaAnalysis(alert, analysed, history) {
   const notAnalysed = alert.entries.filter(
     (e) => e.state === 'firing' && e.hosts.length < FLEET_EVENT_MIN_HOSTS && !analysed.some((a) => a.entry === e),
   );
-  if (notAnalysed.length) {
-    blocks.push(context(`Also firing: ${notAnalysed.map((e) => `\`${e.hosts[0]}\``).join(', ')}`));
+  // Trailing notes and the footer go at the bottom of the last card
+  const last = cards.length ? cards[cards.length - 1].blocks : null;
+  if (notAnalysed.length && last) {
+    last.push(context(`Also firing: ${notAnalysed.map((e) => `\`${e.hosts[0]}\``).join(', ')}`));
   }
 
   // Recoveries are only worth a line next to something that is still firing
   const resolved = alert.entries.filter((e) => e.state === 'resolved' && e.hosts.length < FLEET_EVENT_MIN_HOSTS);
-  if (resolved.length && blocks.length) {
+  if (resolved.length && last) {
     const lines = resolved.slice(0, 10).map((e) => {
       const mins = e.start && e.end ? Math.max(1, Math.round((e.end - e.start) / 60)) : null;
       return `:white_check_mark: \`${e.hosts[0]}\` recovered${e.shownTime ? ` at ${e.shownTime}` : ''}${mins ? ` after ${mins} min` : ''}`;
     });
     const more = andMore(resolved.length, 10, '');
-    blocks.push(context([...lines, ...(more ? [more] : [])].join('\n')));
+    last.push(context([...lines, ...(more ? [more] : [])].join('\n')));
   }
 
-  if (blocks.length === 0) return null;
-  return { text: `${alert.rule}: ${summary.join('; ')}`, blocks };
+  if (!last) return null;
+  const took = run.elapsedMs !== undefined ? ` · ${(run.elapsedMs / 1000).toFixed(1)} s` : '';
+  last.push(context(`:gear: Rule-based analysis of Grafana metrics and logs · no AI model, 0 tokens${took}`));
+  return { text: `${alert.rule}: ${summary.join('; ')}`, attachments: cards };
 }
 
 /**
@@ -351,6 +368,7 @@ export async function handleGrafanaNotify({ client, event, logger }) {
   const alert = parseGrafanaAlert(message);
   if (!alert || alert.entries.length === 0) return;
 
+  const startedAt = Date.now();
   try {
     const firing = alert.entries
       .filter((e) => e.state === 'firing' && e.hosts.length < FLEET_EVENT_MIN_HOSTS)
@@ -375,16 +393,16 @@ export async function handleGrafanaNotify({ client, event, logger }) {
       message.ts,
     ).catch(() => new Map());
 
-    const analysis = formatGrafanaAnalysis(alert, analysed, history);
+    const analysis = formatGrafanaAnalysis(alert, analysed, history, { elapsedMs: Date.now() - startedAt });
     if (!analysis) return;
-    const { text, blocks } = analysis;
+    const { text, attachments } = analysis;
 
     if (replyMode === 'thread') {
       await client.chat.postMessage({
         channel: message.channel,
         thread_ts: message.ts,
         text,
-        blocks,
+        attachments,
         unfurl_links: false,
       });
     } else if (config.adminDmChannel) {
@@ -396,7 +414,8 @@ export async function handleGrafanaNotify({ client, event, logger }) {
       await client.chat.postMessage({
         channel: config.adminDmChannel,
         text,
-        blocks: [preview, ...blocks],
+        blocks: [preview],
+        attachments,
         unfurl_links: false,
       });
     }

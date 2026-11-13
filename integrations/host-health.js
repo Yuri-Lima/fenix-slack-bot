@@ -331,14 +331,14 @@ function checkName(metric) {
 const pct = (/** @type {number} */ share) => `${Math.round(share * 100)}%`;
 
 /**
- * How urgent a verdict is. One emoji per status, used the same way everywhere.
- * @type {Record<'down' | 'action' | 'watch' | 'false-alarm', { emoji: string, label: string }>}
+ * How urgent a verdict is. One emoji and one bar colour per status, used the same way everywhere.
+ * @type {Record<'down' | 'action' | 'watch' | 'false-alarm', { emoji: string, label: string, color: string }>}
  */
 export const VERDICT_STATUS = {
-  down: { emoji: ':red_circle:', label: 'Down' },
-  action: { emoji: ':large_orange_circle:', label: 'Needs action' },
-  watch: { emoji: ':large_yellow_circle:', label: 'Worth a look' },
-  'false-alarm': { emoji: ':large_green_circle:', label: 'False alarm' },
+  down: { emoji: ':red_circle:', label: 'Down', color: '#D63232' },
+  action: { emoji: ':large_orange_circle:', label: 'Needs action', color: '#F2994A' },
+  watch: { emoji: ':large_yellow_circle:', label: 'Worth a look', color: '#F2C94C' },
+  'false-alarm': { emoji: ':large_green_circle:', label: 'False alarm', color: '#2EB67D' },
 };
 
 /**
