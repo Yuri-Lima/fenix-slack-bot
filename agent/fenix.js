@@ -14,6 +14,8 @@ import {
 } from '../utils/feedback-store.js';
 import { textResult } from '../utils/helpers.js';
 import { isWhitelisted } from '../utils/input-guard.js';
+import { formatUsageSummary, usageStatsFor } from '../utils/usage-report.js';
+import { recordUsage } from '../utils/usage-store.js';
 import { ALL_TOOLS } from './tools/index.js';
 
 const MAX_CONCURRENT_AGENTS = 3;
@@ -153,6 +155,11 @@ If the \`list_user_feedback\` or \`feedback_stats\` tools are available, you may
 when asked about feedback. If they are not available, tell the user that only the \
 bot administrator can view feedback.
 
+## YOUR OWN USAGE
+If an admin asks how many tokens, how much money, or which models you used, call \`usage_report\` and \
+answer from it. For the full visual report, tell them to send \`report\` (or \`report 7d\`, \
+\`report last-month\`); it costs no tokens.
+
 ## EMOJI REACTIONS
 React to every user message with \`add_emoji_reaction\` before responding. \
 Pick any Slack emoji that reflects the topic or tone of the message. Be creative. \
@@ -219,17 +226,72 @@ const EMOJI_DESCRIPTION =
  */
 
 /**
- * Run the Fenix agent for one user message in a Slack thread.
+ * Per-model token usage, cost, turns and duration from the SDK's final result message.
+ * @param {any} result - SDKResultMessage (success or error)
+ * @returns {Pick<import('../utils/usage-store.js').UsageRecord, 'models' | 'costUsd' | 'turns' | 'durationMs'>}
+ */
+export function usageFromResult(result) {
+  /** @type {Record<string, import('../utils/usage-store.js').ModelTokens>} */
+  const models = {};
+  for (const [model, u] of Object.entries(result?.modelUsage || {})) {
+    const m = /** @type {any} */ (u);
+    models[model] = {
+      input: m.inputTokens || 0,
+      output: m.outputTokens || 0,
+      cacheRead: m.cacheReadInputTokens || 0,
+      cacheWrite: m.cacheCreationInputTokens || 0,
+      costUsd: m.costUSD || 0,
+    };
+  }
+  return {
+    models,
+    costUsd: result?.total_cost_usd || 0,
+    turns: result?.num_turns || 0,
+    durationMs: result?.duration_ms || 0,
+  };
+}
+
+/**
+ * Run the Fenix agent for one user message in a Slack thread. Every run, including
+ * rejected and failed ones, is recorded in the usage log.
  * @param {string} text - The user's message text.
  * @param {string | undefined} sessionId - An existing session ID to resume the thread's conversation.
  * @param {FenixDeps} deps - Slack context for the thread; Slack-bound tools close over it.
- * @returns {Promise<{responseText: string, sessionId: string | null}>}
+ * @returns {Promise<{ responseText: string, sessionId: string | null, usage: import('../utils/usage-store.js').UsageRecord }>}
  */
 export async function runFenixAgent(text, sessionId, deps) {
+  const startedAt = Date.now();
+  /**
+   * @param {import('../utils/usage-store.js').UsageRecord['outcome']} outcome
+   * @param {Partial<import('../utils/usage-store.js').UsageRecord>} [extra]
+   */
+  const record = (outcome, extra = {}) => {
+    /** @type {import('../utils/usage-store.js').UsageRecord} */
+    const usage = {
+      ts: new Date().toISOString(),
+      kind: 'agent',
+      outcome,
+      userId: deps.userId,
+      userName: deps.userName,
+      where: deps.channelId.startsWith('D') ? 'dm' : 'channel',
+      models: {},
+      costUsd: 0,
+      turns: 0,
+      durationMs: Date.now() - startedAt,
+      tools: {},
+      resumed: Boolean(sessionId),
+      ...extra,
+    };
+    void recordUsage(usage);
+    return usage;
+  };
+
   // Reject before doing any work: one run per thread, and a global cap
   const key = threadKey(deps.channelId, deps.threadTs);
-  if (threadLocks.has(key)) return { responseText: THREAD_BUSY_MESSAGE, sessionId: null };
-  if (activeAgents >= MAX_CONCURRENT_AGENTS) return { responseText: AGENT_BUSY_MESSAGE, sessionId: null };
+  if (threadLocks.has(key)) return { responseText: THREAD_BUSY_MESSAGE, sessionId: null, usage: record('busy') };
+  if (activeAgents >= MAX_CONCURRENT_AGENTS) {
+    return { responseText: AGENT_BUSY_MESSAGE, sessionId: null, usage: record('busy') };
+  }
 
   // Closure-based tools that need deps for Slack API access
   const addEmojiReactionTool = tool(
@@ -304,6 +366,7 @@ export async function runFenixAgent(text, sessionId, deps) {
     },
   );
 
+  /** @type {Array<import('@anthropic-ai/claude-agent-sdk').SdkMcpToolDefinition<any>>} */
   const closureTools = [addEmojiReactionTool, markResolvedTool, saveFeedbackTool];
 
   // Admin-only tools: only injected when the caller is whitelisted
@@ -364,7 +427,24 @@ export async function runFenixAgent(text, sessionId, deps) {
       },
     );
 
-    closureTools.push(listFeedbackTool, feedbackStatsTool);
+    const usageReportTool = tool(
+      'usage_report',
+      "Fenix's own AI usage: replies, tokens, cost, models, users, tools, reply times. Admin only. " +
+        'Returns a finished summary; for the full visual report the user can send `report`.',
+      {
+        period: z
+          .string()
+          .optional()
+          .describe("'month' (default), 'last-month', '7d', '24h', or a month like '2026-10'"),
+      },
+      async ({ period }) => {
+        const stats = usageStatsFor(period || '');
+        if (!stats) return textResult(`Unknown period "${period}". Use month, last-month, 7d, 24h or YYYY-MM.`, true);
+        return textResult(formatUsageSummary(stats));
+      },
+    );
+
+    closureTools.push(listFeedbackTool, feedbackStatsTool, usageReportTool);
   }
 
   const fenixToolsServer = createSdkMcpServer({
@@ -397,29 +477,43 @@ export async function runFenixAgent(text, sessionId, deps) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), AGENT_TIMEOUT_MS);
 
+  /** @type {Record<string, number>} */
+  const tools = {};
   try {
     const responseParts = [];
     let newSessionId = null;
+    /** @type {any} */
+    let result = null;
 
     for await (const message of query({ prompt: text, options: { ...options, abortController: ac } })) {
       if (message.type === 'assistant') {
         for (const block of message.message.content) {
           if (block.type === 'text') {
             responseParts.push(block.text);
+          } else if (block.type === 'tool_use') {
+            const name = block.name.replace(MCP_PREFIX, '');
+            tools[name] = (tools[name] || 0) + 1;
           }
         }
       }
       if (message.type === 'result') {
         newSessionId = message.session_id;
+        result = message;
       }
     }
 
     const responseText = responseParts.join('\n');
-    return { responseText, sessionId: newSessionId };
+    const usage = record(result?.is_error ? 'error' : 'ok', {
+      ...usageFromResult(result),
+      tools,
+      ...(result?.is_error && { error: result.subtype }),
+    });
+    return { responseText, sessionId: newSessionId, usage };
   } catch (e) {
     if (ac.signal.aborted) {
-      return { responseText: AGENT_TIMEOUT_MESSAGE, sessionId: null };
+      return { responseText: AGENT_TIMEOUT_MESSAGE, sessionId: null, usage: record('timeout', { tools }) };
     }
+    record('error', { tools, error: String(/** @type {any} */ (e)?.name || 'Error') });
     throw e;
   } finally {
     clearTimeout(timer);

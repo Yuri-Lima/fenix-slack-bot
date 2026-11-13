@@ -3,6 +3,7 @@ import { GENERIC_ERROR_MESSAGE, gateRequest, isWhitelisted } from '../../utils/i
 import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
 import { handleDeleteCommand, isDeleteCommand } from './delete-thread.js';
+import { handleReportCommand, parseReportCommand } from './usage-report-command.js';
 
 /**
  * Handle app_mention events and run the Fenix agent.
@@ -22,6 +23,14 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     if (isDeleteCommand(cleanedText)) {
       if (!isWhitelisted(event.user)) return;
       await handleDeleteCommand({ client, event, botUserId: context.botUserId, botId: context.botId, logger });
+      return;
+    }
+
+    // `@Fenix report [period]`: usage report built in code (no AI tokens). Owner-only.
+    const reportPeriod = parseReportCommand(cleanedText);
+    if (reportPeriod !== null) {
+      if (!isWhitelisted(event.user)) return;
+      await handleReportCommand({ client, channel: channelId, threadTs, periodArg: reportPeriod });
       return;
     }
 

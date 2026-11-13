@@ -95,6 +95,10 @@ The store uses a `Map` keyed by `${channelId}:${threadTs}` with TTL-based cleanu
 
 Tool handlers return `textResult(message, true)` from every `catch`, so the agent sees failures as errors.
 
+### Usage Tracking
+
+Every run is recorded through `utils/usage-store.js`: `runFenixAgent()` records agent runs (including busy, timeout and error outcomes) from the SDK result's `modelUsage`, `total_cost_usd`, `num_turns` and `duration_ms`; rule-based analyses record `ruleBasedRun()` with zero tokens. Logs rotate monthly (`data/usage/YYYY-MM.jsonl`, append-only, retention `usage.retentionMonths`). Never store message text. Reports are aggregated in code (`utils/usage-report.js`, `listeners/views/usage-report-builder.js`); never send raw usage records to the model.
+
 ### Tool Definitions
 
 Tools in `agent/tools/` are defined using `tool()` from the Claude Agent SDK:

@@ -22,6 +22,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {{ url: string | null, botId: string | null, prometheusUid: string | null, lokiUid: string | null, replyMode: 'dm' | 'thread' | 'off' }} grafana
  *   Grafana alert analysis. replyMode 'dm' sends analyses to adminDmChannel (preview), 'thread' replies under the alert.
  * @property {string} contextFile - Markdown appended to the system prompt (team-specific knowledge)
+ * @property {{ retentionMonths: number }} usage - Agent usage log: monthly files kept for this many months
  * @property {string} timeZone - IANA time zone for times shown in Slack (alerts use it too)
  * @property {string} dataDir - Directory for persisted state (feedback, failure log), relative to the project root
  */
@@ -38,6 +39,7 @@ const DEFAULTS = {
   grafana: { url: null, botId: null, prometheusUid: null, lokiUid: null, replyMode: 'dm' },
   contextFile: 'prompts/context.local.md',
   dataDir: 'data',
+  usage: { retentionMonths: 12 },
   timeZone: 'UTC',
 };
 
@@ -57,6 +59,7 @@ function loadConfig() {
     gitlab: { ...DEFAULTS.gitlab, ...file.gitlab },
     youtrack: { ...DEFAULTS.youtrack, ...file.youtrack },
     grafana: { ...DEFAULTS.grafana, ...file.grafana },
+    usage: { ...DEFAULTS.usage, ...file.usage },
   };
 }
 

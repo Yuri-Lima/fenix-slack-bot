@@ -3,6 +3,7 @@ import { sessionStore } from '../../thread-context/index.js';
 import { GENERIC_ERROR_MESSAGE, gateRequest, isWhitelisted } from '../../utils/input-guard.js';
 import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
+import { handleReportCommand, parseReportCommand } from './usage-report-command.js';
 
 /**
  * @param {import('@slack/types').MessageEvent} event
@@ -69,6 +70,13 @@ export async function handleMessage({ client, context, event, logger, say, saySt
       );
     }
     await say({ text: gate.reply, thread_ts: threadTs });
+    return;
+  }
+
+  // `report [period]`: usage report built in code (no AI tokens); only owners get past the gate
+  const reportPeriod = parseReportCommand(text);
+  if (reportPeriod !== null) {
+    await handleReportCommand({ client, channel: event.channel, threadTs, periodArg: reportPeriod });
     return;
   }
 

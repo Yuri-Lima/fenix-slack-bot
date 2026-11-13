@@ -13,6 +13,7 @@ import {
 import { classifyTest, getTestHistory, INFRA_KILL_NAME_SUFFIX, isInfraKill } from '../../integrations/test-history.js';
 import { recordBuildResults } from '../../utils/flaky-store.js';
 import { andMore, shortTestName } from '../../utils/helpers.js';
+import { recordUsage, ruleBasedRun } from '../../utils/usage-store.js';
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Derived from buildUrl() so link format and link parsing cannot drift apart
@@ -884,6 +885,7 @@ export async function handleTeamCityNotify({ client, event, logger }) {
   const parsed = parseBuildUrl(event.text);
   if (!parsed) return;
 
+  const startedAt = Date.now();
   try {
     const analysis = await analyzeBuild(parsed.buildId, parsed.configId);
 
@@ -906,6 +908,7 @@ export async function handleTeamCityNotify({ client, event, logger }) {
       text: message,
       unfurl_links: false,
     });
+    void recordUsage(ruleBasedRun('teamcity', parsed.configId, startedAt));
   } catch (err) {
     logger.error(`TeamCity notify analysis failed for build ${parsed.buildId}: ${err}`);
     await client.chat.postMessage({

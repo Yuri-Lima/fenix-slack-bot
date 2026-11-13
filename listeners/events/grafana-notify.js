@@ -1,6 +1,7 @@
 import { config } from '../../config.js';
 import { alertKind, clock, collectHostEvidence, diagnose, VERDICT_STATUS } from '../../integrations/host-health.js';
 import { andMore } from '../../utils/helpers.js';
+import { recordUsage, ruleBasedRun } from '../../utils/usage-store.js';
 
 // Explains Grafana alerts posted by the Grafana Slack app. Each firing host gets
 // an evidence-based verdict; resolved hosts get their duration; many hosts at
@@ -419,6 +420,7 @@ export async function handleGrafanaNotify({ client, event, logger }) {
         unfurl_links: false,
       });
     }
+    void recordUsage(ruleBasedRun('grafana', alert.rule, startedAt));
   } catch (e) {
     logger.error(`Grafana alert analysis failed for "${alert.rule}": ${e}`);
   }

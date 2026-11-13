@@ -1,5 +1,7 @@
 import { runFenixAgent } from '../agent/index.js';
 import { sessionStore } from '../thread-context/index.js';
+import { formatUsageFooter } from '../utils/usage-report.js';
+import { monthToDate } from '../utils/usage-store.js';
 import { buildFeedbackBlocks } from './views/feedback-builder.js';
 
 const LOADING_MESSAGES = [
@@ -41,7 +43,11 @@ export async function replyWithAgent({
   await setStatus({ status: 'Thinking…', loading_messages: LOADING_MESSAGES });
 
   const deps = { client, channelId, threadTs, messageTs, userId, userName };
-  const { responseText, sessionId: newSessionId } = await runFenixAgent(text, existingSessionId ?? undefined, deps);
+  const {
+    responseText,
+    sessionId: newSessionId,
+    usage,
+  } = await runFenixAgent(text, existingSessionId ?? undefined, deps);
 
   if (newSessionId) {
     sessionStore.setSession(channelId, threadTs, newSessionId);
@@ -49,5 +55,11 @@ export async function replyWithAgent({
 
   const streamer = sayStream();
   await streamer.append({ markdown_text: responseText });
-  await streamer.stop({ blocks: buildFeedbackBlocks() });
+  // Model, tokens and cost of this reply, plus the month so far; nothing for rejected (busy) runs
+  /** @type {import('@slack/types').KnownBlock[]} */
+  const footer =
+    usage.outcome === 'busy'
+      ? []
+      : [{ type: 'context', elements: [{ type: 'mrkdwn', text: formatUsageFooter(usage, monthToDate()) }] }];
+  await streamer.stop({ blocks: [...footer, ...buildFeedbackBlocks()] });
 }

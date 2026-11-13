@@ -42,6 +42,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | 🎫 | **YouTrack assistant** | Search, read, create, and update issues in natural language, with explicit confirmation before any write. |
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
 | 📝 | **"Create YouTrack Ticket" shortcut** | Message shortcut that turns any Slack message (and its surrounding context) into a pre-filled ticket. |
+| 📊 | **Usage tracking** | Every agent reply ends with its model, tokens, cost and steps, plus the month to date. Every run is logged to a monthly file, and `report` gives a full usage report computed in code (no AI tokens). |
 | 🧹 | **Thread cleanup** | `@Fenix delete` removes every message Fenix posted in a thread. |
 | 💬 | **Feedback loop** | 👍/👎 buttons on every answer plus conversational feedback capture, stored for the owner to review. |
 | 🛡️ | **Guardrails** | Owner allowlist, prompt-injection and credential-probing detection with strikes, a strict tool allowlist, and redaction rules. |
@@ -62,6 +63,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 
 | Command | Who | Effect |
 |---|---|---|
+| `report [period]` (DM) / `@Fenix report [period]` | Owners | Full usage report: replies, tokens, cost, cache share, per-reply averages and p50/p95 time, by model, user, day and tool, costliest replies, and rule-based analyses. Period: `7d`, `24h`, `last-month`, `2026-10`; default this month. Built in code, so it costs no AI tokens. |
 | `@Fenix delete` | Owners | Deletes every message Fenix posted in the current thread (parent included, if Fenix posted it), then confirms privately. Anyone else is ignored silently. |
 
 ## Tool catalog
@@ -205,6 +207,28 @@ The footer is honest about cost: the analysis is deterministic code over Grafana
 Five or more hosts in one alert line are treated as one fleet-wide event (network, monitoring, or a shared
 dependency) instead of separate problems. Messages that only report recoveries get no reply.
 
+## Usage tracking
+
+Every Fenix run is appended as one JSON line to a monthly log, `data/usage/YYYY-MM.jsonl` (UTC months). The
+current month's file is the only write target; files older than `usage.retentionMonths` (default 12) are deleted
+when a new month starts. A line is about 0.5 KB and never contains message text:
+
+| Field | Content |
+|---|---|
+| `kind`, `outcome` | `agent`, `grafana` or `teamcity`; `ok`, `error`, `timeout` or `busy` |
+| `models` | Per model ID: fresh input, output, cache-read and cache-write tokens, and estimated cost |
+| `costUsd`, `turns`, `durationMs` | Totals for the run, from the Agent SDK's final result |
+| `tools` | Tool name → number of calls |
+| `userId`, `userName`, `where`, `resumed` | Who asked, in a DM or a channel, and whether the thread continued a conversation |
+
+Agent replies end with a footer such as
+`🤖 sonnet-4-5 · 2.3k in · 800 out · 90.0k cache · $0.04 · 3 steps · 8.0 s · month: 1.23M tokens · $14.20`.
+The month-to-date total is kept in memory, so the footer never re-reads the log.
+
+Reports cost no tokens: `report` aggregates the log in code and renders a Block Kit card. Asking in natural
+language ("how much did we spend this week?") uses the owner-only `usage_report` tool, which hands the model only
+the finished summary.
+
 ## Architecture
 
 ```mermaid
@@ -239,7 +263,7 @@ flowchart LR
 | **Tools** | Defined with `tool()` and Zod schemas, served by an in-process MCP server (`createSdkMcpServer`). Slack-bound tools are closures over the current channel and thread. |
 | **Integrations** | `integrations/` holds the only TeamCity, YouTrack, GitLab, and Grafana clients (shared timeout and error format; TeamCity calls go through one limiter of 4 concurrent requests, at most 100 queued for up to 60 s). Agent tools and Slack listeners both import from it. |
 | **Conversation state** | Only SDK session IDs are stored, keyed by `channel:thread_ts` (24 h TTL, 1,000 entries). Each mention or DM resumes its thread's session. |
-| **Persistence** | JSON files under `data/`: feedback (last 500 entries) and a per-configuration failure log. |
+| **Persistence** | Files under `data/`: feedback (last 500 entries), a per-configuration failure log, and monthly usage logs. |
 
 ## Configuration
 
@@ -283,6 +307,7 @@ cp fenix.config.example.json fenix.config.json
 | `grafana.url` / `grafana.botId` | Grafana base URL and the Slack bot ID of the Grafana app, whose alert posts trigger the analysis. |
 | `grafana.prometheusUid` / `grafana.lokiUid` | Data source UIDs for metrics and logs. |
 | `grafana.replyMode` | `dm` (default) sends analyses to `adminDmChannel` as a preview, `thread` replies under the alert, `off` disables it. |
+| `usage.retentionMonths` | Months of usage logs to keep (default 12). |
 | `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |
 | `dataDir` | Directory for persisted state: feedback and the failure log (default `data`). |
