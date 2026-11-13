@@ -15,6 +15,7 @@ import {
 import { textResult } from '../utils/helpers.js';
 import { isWhitelisted } from '../utils/input-guard.js';
 import { recordUsage } from '../utils/usage-store.js';
+import { createIgnoreHostsTool } from './tools/grafana.js';
 import { ALL_TOOLS } from './tools/index.js';
 import { usageReportTool } from './tools/usage.js';
 
@@ -445,7 +446,12 @@ export async function runFenixAgent(text, sessionId, deps) {
       },
     );
 
-    closureTools.push(listFeedbackTool, feedbackStatsTool, usageReportTool);
+    closureTools.push(
+      listFeedbackTool,
+      feedbackStatsTool,
+      usageReportTool,
+      createIgnoreHostsTool(() => deps.userName || deps.userId),
+    );
   }
 
   const fenixToolsServer = createSdkMcpServer({

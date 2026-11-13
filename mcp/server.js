@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createIgnoreHostsTool } from '../agent/tools/grafana.js';
 import { createSlackMcpTools, READ_ONLY_TOOLS } from '../agent/tools/index.js';
 import { config } from '../config.js';
 import { buildApprovalBlocks } from '../listeners/views/mcp-oauth-approval-builder.js';
@@ -385,6 +386,7 @@ export function startMcpServer(logger, slack) {
         return;
       }
       // Sending needs the `send` scope; clients with sendApproval "slack" only draft, an owner sends
+      /** @type {any[]} */
       const owner =
         slackTools && caller.scopes.includes('send')
           ? [
@@ -403,6 +405,11 @@ export function startMcpServer(logger, slack) {
               }),
             ]
           : [];
+      // Changing what Fenix analyses is for connections that act without Slack approval (Claude Code,
+      // which asks its user before each tool call); clients that only draft never get it
+      if (caller.scopes.includes('send') && caller.sendApproval === 'none') {
+        owner.push(createIgnoreHostsTool(() => caller.name));
+      }
       const server = buildMcpServer({ readOnly: slackTools?.readOnly, owner, caller });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => {

@@ -1,5 +1,6 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { config } from '../../config.js';
 import {
   clip,
   collectHostEvidence,
@@ -7,6 +8,7 @@ import {
   evidenceFields,
   ignoredBy,
   ignoredHostMessage,
+  ignoreHostParts,
   lastSeenWithin,
   logHosts,
   notableKinds,
@@ -14,6 +16,7 @@ import {
 } from '../../integrations/host-health.js';
 import { formatHostLogs, MAX_LOG_MINUTES, readHostLogs, resolveLogHost } from '../../integrations/host-logs.js';
 import { textResult } from '../../utils/helpers.js';
+import { addedIgnoreParts, addIgnorePart, removeIgnorePart } from '../../utils/ignore-hosts-store.js';
 
 const STATUS_ORDER = ['down', 'action', 'watch', 'false-alarm'];
 /** How far back to look for a server that sent nothing in the requested window. */
@@ -109,3 +112,108 @@ export const hostLogsTool = tool(
     }
   },
 );
+
+/** A server name part: lowercase letters, digits, dots, dashes and underscores, 2-63 characters. */
+const NAME_PART = /^[a-z0-9][a-z0-9._-]{1,62}$/;
+
+/**
+ * Servers currently sending logs whose names contain `part`, or null when Grafana cannot be asked.
+ * @param {string} part
+ * @returns {Promise<{ matches: string[], known: number } | null>}
+ */
+async function serversMatching(part) {
+  const known = await logHosts().catch(() => null);
+  if (!known) return null;
+  return { matches: known.filter((h) => h.toLowerCase().includes(part)).sort(), known: known.length };
+}
+
+/** @param {{ matches: string[], known: number } | null} found */
+const matchSummary = (found) =>
+  !found
+    ? 'Could not check which servers it matches (Grafana unavailable).'
+    : found.matches.length
+      ? `Matches ${found.matches.length} of ${found.known} servers sending logs: ${found.matches.join(', ')}.`
+      : 'No server sending logs right now matches it; it applies to matching servers from now on.';
+
+/**
+ * Tool to list, add or remove the server name parts excluded from Grafana analysis (alerts, host_health,
+ * host_logs). Added parts live in data/ (they survive deploys); the ones in fenix.config.json can only be
+ * changed there. It changes Fenix's behaviour, so it is offered to owners only.
+ * @param {() => string} actor - who is asking, recorded with each addition
+ */
+export function createIgnoreHostsTool(actor) {
+  return tool(
+    'grafana_ignore_hosts',
+    'List, add or remove the server name parts Fenix excludes from Grafana analysis (alert analyses, host_health, ' +
+      'host_logs), e.g. "test" excludes every server whose name contains "test". Matching is a case-insensitive ' +
+      'substring, so check the listed matches before adding. Use when the user asks to ignore, stop analysing, ' +
+      'mute or un-ignore a server or a group of servers.',
+    {
+      action: z.enum(['list', 'add', 'remove']).describe('list the excluded parts, add one, or remove one'),
+      part: z
+        .string()
+        .optional()
+        .describe(
+          'The server name part to add or remove, e.g. "staging" or a full server name. Required for add and remove.',
+        ),
+    },
+    async ({ action, part }) => {
+      try {
+        if (action === 'list') {
+          const fromConfig = config.grafana.ignoreHosts.map((p) => String(p).toLowerCase());
+          const added = addedIgnoreParts();
+          if (!fromConfig.length && !added.length) return textResult('No servers are excluded from Grafana analysis.');
+          const lines = [];
+          for (const p of fromConfig) lines.push(`• "${p}" (fenix.config.json; change it there and deploy)`);
+          for (const a of added) lines.push(`• "${a.part}" (added by ${a.addedBy}, ${a.addedAt.slice(0, 10)})`);
+          const known = await logHosts().catch(() => null);
+          const excluded = known ? known.filter((h) => ignoredBy(h)).sort() : null;
+          const now = excluded
+            ? `\nServers excluded right now (${excluded.length} of ${known?.length}): ${excluded.join(', ') || 'none'}.`
+            : '';
+          return textResult(`Excluded from Grafana analysis:\n${lines.join('\n')}${now}`);
+        }
+
+        const value = (part || '').trim().toLowerCase();
+        if (!NAME_PART.test(value)) {
+          return textResult(
+            'Give `part`: 2-63 lowercase letters, digits, dots, dashes or underscores, e.g. "staging".',
+            true,
+          );
+        }
+
+        if (action === 'remove') {
+          if (removeIgnorePart(value)) return textResult(`Removed "${value}": matching servers are analysed again.`);
+          if (config.grafana.ignoreHosts.some((p) => String(p).toLowerCase() === value)) {
+            return textResult(
+              `"${value}" comes from fenix.config.json (grafana.ignoreHosts); remove it there and deploy.`,
+              true,
+            );
+          }
+          return textResult(
+            `"${value}" is not excluded. Current parts: ${ignoreHostParts().join(', ') || 'none'}.`,
+            true,
+          );
+        }
+
+        // add
+        if (ignoreHostParts().includes(value)) return textResult(`"${value}" is already excluded.`);
+        const found = await serversMatching(value);
+        if (found && found.known > 1 && found.matches.length === found.known) {
+          return textResult(
+            `Not added: "${value}" matches every server sending logs (${found.known}), so Fenix would analyse ` +
+              'nothing. Use a more specific part or the full server name.',
+            true,
+          );
+        }
+        addIgnorePart(value, actor());
+        return textResult(
+          `Added "${value}": Fenix no longer analyses alerts for, or answers host_health / host_logs about, ` +
+            `servers whose names contain it. ${matchSummary(found)}`,
+        );
+      } catch (e) {
+        return textResult(`Could not update the excluded servers: ${e instanceof Error ? e.message : e}`, true);
+      }
+    },
+  );
+}

@@ -36,7 +36,7 @@ describe('MCP server', () => {
     return client;
   };
 
-  it('lists only the read-only tools, marked read-only', async () => {
+  it("lists the read-only tools marked read-only, plus the owner's grafana_ignore_hosts", async () => {
     const client = await connect('test-mcp-token');
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
@@ -45,7 +45,10 @@ describe('MCP server', () => {
     assert.ok(names.includes('usage_report'));
     assert.ok(!names.includes('youtrack_create_issue'));
     assert.ok(!names.includes('youtrack_update_issue'));
-    assert.ok(tools.every((t) => t.annotations?.readOnlyHint === true));
+    // The static token is the owner's Claude Code, which may change what Fenix analyses
+    const ignore = tools.find((t) => t.name === 'grafana_ignore_hosts');
+    assert.strictEqual(ignore?.annotations?.readOnlyHint, false);
+    assert.ok(tools.filter((t) => t !== ignore).every((t) => t.annotations?.readOnlyHint === true));
     await client.close();
   });
 

@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { compact } from '../utils/helpers.js';
+import { addedIgnoreParts } from '../utils/ignore-hosts-store.js';
 import { lokiInstant, lokiLabelValues, lokiRange, promQuery, promRange } from './grafana.js';
 
 // Evidence about one host over a time window, gathered from Prometheus
@@ -63,14 +64,24 @@ export const q = (value) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 export const re = (value) => q(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 
 /**
- * The configured name part that excludes a host from analysis (`grafana.ignoreHosts`, case-insensitive),
- * e.g. "test" for test servers, or null when the host is analysed.
+ * Every server name part excluded from analysis, lowercase: `grafana.ignoreHosts` from fenix.config.json
+ * plus the ones owners added by asking Fenix (utils/ignore-hosts-store.js).
+ * @returns {string[]}
+ */
+export function ignoreHostParts() {
+  const parts = [...config.grafana.ignoreHosts, ...addedIgnoreParts().map((a) => a.part)];
+  return [...new Set(parts.map((p) => String(p).toLowerCase()).filter(Boolean))];
+}
+
+/**
+ * The name part that excludes a host from analysis (case-insensitive), e.g. "test" for test servers,
+ * or null when the host is analysed.
  * @param {string} host
  * @returns {string | null}
  */
 export function ignoredBy(host) {
   const name = host.toLowerCase();
-  return config.grafana.ignoreHosts.find((part) => part && name.includes(String(part).toLowerCase())) ?? null;
+  return ignoreHostParts().find((part) => name.includes(part)) ?? null;
 }
 
 /**
@@ -79,7 +90,7 @@ export function ignoredBy(host) {
  * @returns {string}
  */
 export function ignoredHostMessage(host) {
-  return `${host} is not analysed: server names containing "${ignoredBy(host)}" are excluded (test servers). Tell the user.`;
+  return `${host} is not analysed: server names containing "${ignoredBy(host)}" are excluded from analysis. Tell the user.`;
 }
 
 /** Hosts that sent logs within this window can be found by name. */

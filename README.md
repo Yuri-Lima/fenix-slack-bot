@@ -222,6 +222,16 @@ last 5 minutes?"* or *"any timeouts on web-01 this hour?"*. Two read-only tools 
 
 A typical answer costs a few thousand tokens, since the model reads the grouped timeline, not raw logs.
 
+### Excluding servers
+
+Servers whose names contain a part in `grafana.ignoreHosts` (e.g. `"test"`) are never analysed. Owners can also
+change the list by asking, in Slack or from Claude Code: *"stop analysing the staging servers"*, *"ignore
+billing-02"*, *"which servers are ignored?"*, *"analyse staging again"*. The `grafana_ignore_hosts` tool (list / add /
+remove) shows which servers sending logs a part matches, records who added it, and refuses a part that would match
+every server. Parts added this way live in `data/grafana-ignore-hosts.json`, so deploys keep them; parts in
+`fenix.config.json` can only be removed there. It is offered to owners in Slack and to the owner's Claude Code
+connection (`FENIX_MCP_TOKEN`), not to clients that need Slack approval.
+
 ## Usage tracking
 
 Every Fenix run is appended as one JSON line to a monthly log, `data/usage/YYYY-MM.jsonl` (UTC months). The
@@ -432,7 +442,7 @@ cp fenix.config.example.json fenix.config.json
 | `grafana.url` / `grafana.botId` | Grafana base URL and the Slack bot ID of the Grafana app, whose alert posts trigger the analysis. |
 | `grafana.prometheusUid` / `grafana.lokiUid` | Data source UIDs for metrics and logs. |
 | `grafana.replyMode` | `dm` (default) sends analyses to `adminDmChannel` as a preview, `thread` replies under the alert, `off` disables it. |
-| `grafana.ignoreHosts` | Parts of server names Fenix never analyses, case-insensitive (e.g. `["test"]`): their alerts get no reply and `host_logs` / `host_health` decline them. Default none. |
+| `grafana.ignoreHosts` | Parts of server names Fenix never analyses, case-insensitive (e.g. `["test"]`): their alerts get no reply and `host_logs` / `host_health` decline them. Default none. Owners can add more by asking (see *Excluding servers*). |
 | `mcp.enabled` / `mcp.host` / `mcp.port` / `mcp.path` | MCP endpoint for Claude Code (default off, `127.0.0.1:8787/mcp`). |
 | `mcp.publicUrl` / `mcp.oauthRedirectUris` / `mcp.cimdOrigins` | Public HTTPS origin of the endpoint, which turns on OAuth sign-in for Claude app connectors; the callback URLs clients may register; and the origins whose client metadata documents may be fetched (defaults: Claude's). |
 | `mcp.maxUploadMb` / `mcp.maxUploadTotalMb` | Largest image or video an MCP client may upload for `slack_send_message` (default 200 MB), and the total held on disk at once (default 1024 MB). |
