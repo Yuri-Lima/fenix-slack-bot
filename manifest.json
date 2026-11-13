@@ -1,6 +1,6 @@
 {
   "display_information": {
-    "name": "Fenix",
+    "name": "Fenix Bot",
     "description": "AI-powered DevOps assistant for engineering teams",
     "background_color": "#0F1923",
     "long_description": "Fenix is an AI DevOps assistant for engineering teams. It monitors CI/CD pipelines, reports build failures, tracks flaky tests, and delivers real-time notifications to keep the team in the loop. Built to cut through the noise and surface what matters so engineers can focus on shipping."
@@ -15,7 +15,7 @@
       "agent_description": "Hey, I'm Fenix, your DevOps assistant. I can help with CI builds, test reports, and team notifications."
     },
     "bot_user": {
-      "display_name": "Fenix",
+      "display_name": "Fenix Bot",
       "always_online": true
     },
     "shortcuts": [

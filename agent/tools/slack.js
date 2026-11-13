@@ -118,8 +118,8 @@ export function createSlackDirectory(client) {
   const channelCache = { at: 0, list: [] };
   /** @type {{ at: number, members: any[] }} */
   const people = { at: 0, members: [] };
-  /** @type {Promise<BotIdentity | null> | null} */
-  let botIdentity = null;
+  /** @type {{ at: number, identity: Promise<BotIdentity | null> | null }} re-read so a rename in Slack shows up */
+  const botCache = { at: 0, identity: null };
 
   async function channels() {
     if (Date.now() - channelCache.at > DIRECTORY_TTL_MS) {
@@ -166,16 +166,19 @@ export function createSlackDirectory(client) {
   }
 
   function bot() {
-    botIdentity ??= (async () => {
-      const auth = await client.auth.test();
-      const info = await client.users.info({ user: /** @type {string} */ (auth.user_id) });
-      const handle = info.user?.name || auth.user || 'fenix';
-      return { userId: /** @type {string} */ (auth.user_id), handle, name: info.user?.real_name || handle };
-    })().catch(() => {
-      botIdentity = null; // try again next time
-      return null;
-    });
-    return botIdentity;
+    if (!botCache.identity || Date.now() - botCache.at > DIRECTORY_TTL_MS) {
+      botCache.at = Date.now();
+      botCache.identity = (async () => {
+        const auth = await client.auth.test();
+        const info = await client.users.info({ user: /** @type {string} */ (auth.user_id) });
+        const handle = info.user?.name || auth.user || 'fenix';
+        return { userId: /** @type {string} */ (auth.user_id), handle, name: info.user?.real_name || handle };
+      })().catch(() => {
+        botCache.identity = null; // try again next time
+        return null;
+      });
+    }
+    return botCache.identity;
   }
 
   async function members() {
