@@ -102,7 +102,7 @@ Every run is recorded through `utils/usage-store.js`: `runFenixAgent()` records 
 
 ### MCP Endpoint
 
-`mcp/server.js` serves `READ_ONLY_TOOLS` (from `agent/tools/index.js`) to Claude Code over Streamable HTTP, stateless, behind `FENIX_MCP_TOKEN`. It registers the same tool objects the agent uses; never re-implement a tool for MCP. Only add a tool to `READ_ONLY_TOOLS` if it cannot change anything.
+`mcp/server.js` serves `READ_ONLY_TOOLS` (from `agent/tools/index.js`) to Claude Code over Streamable HTTP, stateless, behind `FENIX_MCP_TOKEN`. It registers the same tool objects the agent uses; never re-implement a tool for MCP. Only add a tool to `READ_ONLY_TOOLS` if it cannot change anything. Claude app connectors sign in through the OAuth server in `mcp/oauth.js` (discovery, DCR limited to `mcp.oauthRedirectUris`, PKCE, rotating refresh tokens stored hashed); every sign-in needs an owner's Approve click in Slack (`listeners/actions/mcp-oauth-approval.js`). Never add a way to obtain tokens without that approval.
 
 ### Tool Definitions
 

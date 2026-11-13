@@ -22,7 +22,9 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {{ url: string | null, botId: string | null, prometheusUid: string | null, lokiUid: string | null, replyMode: 'dm' | 'thread' | 'off' }} grafana
  *   Grafana alert analysis. replyMode 'dm' sends analyses to adminDmChannel (preview), 'thread' replies under the alert.
  * @property {string} contextFile - Markdown appended to the system prompt (team-specific knowledge)
- * @property {{ enabled: boolean, host: string, port: number, path: string }} mcp - MCP server for Claude Code (read-only tools, bearer token FENIX_MCP_TOKEN)
+ * @property {{ enabled: boolean, host: string, port: number, path: string, publicUrl: string | null, oauthRedirectUris: string[] }} mcp
+ *   MCP server (read-only tools). Static bearer FENIX_MCP_TOKEN for Claude Code; OAuth with Slack approval for
+ *   Claude app connectors when publicUrl is set (only redirect URIs listed in oauthRedirectUris may register).
  * @property {{ retentionMonths: number }} usage - Agent usage log: monthly files kept for this many months
  * @property {string} timeZone - IANA time zone for times shown in Slack (alerts use it too)
  * @property {string} dataDir - Directory for persisted state (feedback, failure log), relative to the project root
@@ -41,7 +43,14 @@ const DEFAULTS = {
   contextFile: 'prompts/context.local.md',
   dataDir: 'data',
   usage: { retentionMonths: 12 },
-  mcp: { enabled: false, host: '127.0.0.1', port: 8787, path: '/mcp' },
+  mcp: {
+    enabled: false,
+    host: '127.0.0.1',
+    port: 8787,
+    path: '/mcp',
+    publicUrl: null,
+    oauthRedirectUris: ['https://claude.ai/api/mcp/auth_callback', 'https://claude.com/api/mcp/auth_callback'],
+  },
   timeZone: 'UTC',
 };
 

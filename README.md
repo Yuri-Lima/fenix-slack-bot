@@ -243,13 +243,25 @@ the Fenix server.
   gets `401`. The server is stateless (a fresh MCP server per POST) and refuses to start without a token.
 - **Logged:** every call is recorded in the usage log as `kind: "mcp"` with the tool name, outcome, and duration.
 
-Enable it in `fenix.config.json` (`mcp.enabled`, `mcp.host`, `mcp.port`, `mcp.path`) and put it behind your HTTPS
+- **Two ways to sign in:** Claude Code sends the static token as a header. Claude app connectors (claude.ai, desktop,
+  mobile) cannot send headers, so the endpoint is also an **OAuth 2.1 authorization server** (MCP authorization spec):
+  protected-resource and authorization-server metadata under `/.well-known/`, dynamic client registration limited to
+  `mcp.oauthRedirectUris` (Claude's callback URLs), PKCE (S256) codes that work once, 1-hour access tokens, and 30-day
+  refresh tokens that rotate on every use. Tokens are stored only as SHA-256 hashes in `data/mcp-oauth.json`.
+- **Every app sign-in is approved in Slack:** `/authorize` shows a "approve in Slack" page and Fenix DMs each owner
+  an **Approve / Deny** button (only owners can decide; requests expire after 5 minutes). The page continues on its
+  own once approved.
+
+Enable it in `fenix.config.json` (`mcp.enabled`, `mcp.host`, `mcp.port`, `mcp.path`, and `mcp.publicUrl` for OAuth) and put it behind your HTTPS
 reverse proxy; bind it to an address the proxy can reach but the internet cannot (for example Docker's host
 gateway). If the address does not exist yet at boot, Fenix retries every 30 s instead of failing. Then:
 
 ```sh
 claude mcp add --transport http fenix https://<your-fenix-domain>/mcp --header "Authorization: Bearer $(cat ~/.fenix_mcp_token)"
 ```
+
+In the Claude app: *Settings → Connectors → Add custom connector*, enter `https://<your-fenix-domain>/mcp`, and approve
+the request Fenix sends you in Slack.
 
 ## Architecture
 
@@ -331,6 +343,7 @@ cp fenix.config.example.json fenix.config.json
 | `grafana.prometheusUid` / `grafana.lokiUid` | Data source UIDs for metrics and logs. |
 | `grafana.replyMode` | `dm` (default) sends analyses to `adminDmChannel` as a preview, `thread` replies under the alert, `off` disables it. |
 | `mcp.enabled` / `mcp.host` / `mcp.port` / `mcp.path` | MCP endpoint for Claude Code (default off, `127.0.0.1:8787/mcp`). |
+| `mcp.publicUrl` / `mcp.oauthRedirectUris` | Public HTTPS origin of the endpoint, which turns on OAuth sign-in for Claude app connectors, and the callback URLs clients may register (default: Claude's). |
 | `usage.retentionMonths` | Months of usage logs to keep (default 12). |
 | `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |

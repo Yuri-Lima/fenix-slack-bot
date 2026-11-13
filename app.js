@@ -33,7 +33,7 @@ process.on('SIGTERM', async () => {
 (async () => {
   await app.start();
   app.logger.info('Fenix is running!');
-  startMcpServer(app.logger);
+  startMcpServer(app.logger, app.client);
 })().catch((err) => {
   console.error('Failed to start Fenix:', err);
   process.exit(1);
