@@ -1,6 +1,7 @@
 import { config } from '../../config.js';
 import {
   alertKind,
+  clip,
   collectHostEvidence,
   diagnose,
   evidenceFields,
@@ -21,6 +22,8 @@ const FLEET_EVENT_MIN_HOSTS = 5;
 /** Firing hosts analysed per message; the rest are listed. */
 const MAX_ANALYSED_HOSTS = 3;
 const HISTORY_DAYS = 7;
+/** Error line length in the card; longer lines are cut at a word with "…". */
+const MAX_ERROR_CHARS = 220;
 
 /**
  * @typedef {Object} AlertEntry
@@ -258,7 +261,7 @@ export function formatGrafanaAnalysis(alert, analysed, history, run = {}) {
     if (errors.length) {
       blocks.push(
         section(
-          `:warning: *Top errors*\n${errors.map((t) => `> ${t.count}× _${t.service}_  \`${t.pattern.replace(/`/g, "'").slice(0, 120)}\``).join('\n')}`,
+          `:warning: *Top errors*\n${errors.map((t) => `> ${t.count}× _${t.service}_  \`${clip(t.sample.replace(/`/g, "'"), MAX_ERROR_CHARS)}\``).join('\n')}`,
         ),
       );
     }

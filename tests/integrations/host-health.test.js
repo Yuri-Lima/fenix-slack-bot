@@ -1,7 +1,14 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { alertKind, diagnose, logPattern, VERDICT_STATUS } from '../../integrations/host-health.js';
+import {
+  alertKind,
+  clip,
+  diagnose,
+  logPattern,
+  readableLogLine,
+  VERDICT_STATUS,
+} from '../../integrations/host-health.js';
 
 /** Title and detail as one string, for matching. */
 const verdictOf = (kind, e) => {
@@ -58,7 +65,14 @@ describe('diagnose', () => {
       logs: {
         byService: {},
         errorCount: 3,
-        topErrors: [{ pattern: 'database down: Connection pool exhausted', count: 3, service: 'phoenix-system' }],
+        topErrors: [
+          {
+            pattern: 'database down: Connection pool exhausted',
+            sample: 'database down: Connection pool exhausted',
+            count: 3,
+            service: 'phoenix-system',
+          },
+        ],
       },
     });
     assert.match(verdictOf('load', e), /3× "pool exhausted" at the same time, the likely reason/);
@@ -93,6 +107,30 @@ describe('diagnose', () => {
     assert.match(verdictOf('exporter', e), /Health exporter stuck, server is up/);
   });
 
+  it('blames a full database pool, not the exporter, when Phoenix logs it', () => {
+    const e = base({
+      reachability: { nodeUp: true, nodeLastSeen: 1350, exporterUp: false },
+      logs: {
+        byService: {},
+        errorCount: 4,
+        topErrors: [
+          {
+            pattern: 'x',
+            sample:
+              'Health Check has failed! {"database":{"status":"down","message":"Connection pool exhausted: 45 waiting"}}',
+            count: 4,
+            service: 'phoenix-system',
+          },
+        ],
+      },
+    });
+    const v = diagnose('exporter', e);
+    assert.strictEqual(v.status, 'action');
+    assert.match(v.title, /Database connection pool full, server is up/);
+    assert.match(v.detail, /phoenix-system logged 4× "pool exhausted"/);
+    assert.match(v.nextStep, /pg_stat_activity/);
+  });
+
   it('does not treat a missing heartbeat alone as a dead machine', () => {
     assert.match(verdictOf('machine', base()), /Heartbeat missing, server is up/);
   });
@@ -115,6 +153,37 @@ describe('diagnose', () => {
   it('estimates when a disk will be full', () => {
     const e = base({ filesystems: [{ mount: '/', usedPct: 85, growthGbPerDay: 2, daysToFull: 6 }] });
     assert.match(verdictOf('disk', e), /Disk filling up: `\/` is 85% used, \+2\.0 GB in 24 h\. Full in about 6 days/);
+  });
+});
+
+const PHOENIX_HEALTH_LINE =
+  '11/13/26, 3:47 P11 - [PHX] - \x1b[31merror\x1b[39m: Health Check has failed! {"admin-api":{"status":"up"},' +
+  '"database":{"status":"down","message":"Connection pool exhausted: 45 waiting, 100/100 total, 0 idle","waitingCount":45}}';
+const NGINX_LINE =
+  '2026/11/13 17:38:24 [error] 37#37: *954 upstream timed out (110: Operation timed out) while reading response header ' +
+  'from upstream, client: 192.0.2.10, server: _, request: "GET /ws HTTP/1.1", upstream: "http://172.19.0.5:3000/graphql"';
+
+describe('readableLogLine', () => {
+  it('drops the timestamp, colour codes and healthy components, keeping the failing one', () => {
+    assert.strictEqual(
+      readableLogLine(PHOENIX_HEALTH_LINE),
+      '[PHX] - error: Health Check has failed! {"database":{"status":"down","message":"Connection pool exhausted: 45 waiting, 100/100 total, 0 idle","waitingCount":45}}',
+    );
+  });
+
+  it('drops nginx timestamps, worker ids and the client address', () => {
+    assert.strictEqual(
+      readableLogLine(NGINX_LINE),
+      '[error] upstream timed out (110: Operation timed out) while reading response header from upstream, server: _, request: "GET /ws HTTP/1.1", upstream: "http://172.19.0.5:3000/graphql"',
+    );
+  });
+});
+
+describe('clip', () => {
+  it('keeps short text and cuts long text at a word with an ellipsis', () => {
+    assert.strictEqual(clip('short', 10), 'short');
+    assert.strictEqual(clip('alpha beta gamma delta', 15), 'alpha beta…');
+    assert.ok(clip('x'.repeat(50), 10).length === 10);
   });
 });
 

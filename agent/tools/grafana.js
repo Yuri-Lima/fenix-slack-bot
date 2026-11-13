@@ -1,6 +1,7 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import {
+  clip,
   collectHostEvidence,
   diagnose,
   evidenceFields,
@@ -13,6 +14,8 @@ import { textResult } from '../../utils/helpers.js';
 const STATUS_ORDER = ['down', 'action', 'watch', 'false-alarm'];
 /** How far back to look for a server that sent nothing in the requested window. */
 const LOOKBACK_DAYS = 7;
+/** Error line length handed to the model; enough for the cause, cheap in tokens. */
+const MAX_ERROR_CHARS = 400;
 
 /** Strip Slack emoji codes and markup so the text reads well outside Slack too. */
 const plain = (/** @type {string} */ s) => s.replace(/:[a-z_]+: /g, '').replace(/\*/g, '');
@@ -52,7 +55,8 @@ export const hostHealthTool = tool(
       }
       if (verdicts.length === 0) lines.push('- Nothing unusual.');
       lines.push(...evidenceFields(evidence, 'other').map((f) => plain(f).replace('\n', ': ')));
-      for (const t of evidence.logs?.topErrors || []) lines.push(`Error ${t.count}× (${t.service}): ${t.pattern}`);
+      for (const t of evidence.logs?.topErrors || [])
+        lines.push(`Error ${t.count}× (${t.service}): ${clip(t.sample, MAX_ERROR_CHARS)}`);
       return textResult(lines.join('\n'));
     } catch (e) {
       return textResult(`Host health failed: ${/** @type {Error} */ (e).message}`, true);

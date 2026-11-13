@@ -98,23 +98,61 @@ function avgIn(pts, from, to) {
   return inside.length ? inside.reduce((a, b) => a + b, 0) / inside.length : null;
 }
 
+/** Longest log line kept as a sample; display code shortens it further. */
+const MAX_SAMPLE_CHARS = 1000;
+
+/**
+ * A log line as people should read it: no colour codes, no leading timestamp or nginx
+ * worker ids, no client IP, and health-check JSON without the components that are up,
+ * so the failing part comes first.
+ * @param {string} line
+ * @returns {string}
+ */
+export function readableLogLine(line) {
+  return (
+    line
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI color codes, which start with ESC (\x1b)
+      .replace(/\x1b\[[0-9;]*m/g, '')
+      // Leading timestamps: ISO, nginx (2026/11/13 17:38:24), Phoenix (11/13/26, 3:47 P11 -)
+      .replace(/^\s*\d{4}-\d\d-\d\d[T ][\d:.,]+Z?\s*/, '')
+      .replace(/^\s*\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d\s*/, '')
+      .replace(/^\s*\d\d?\/\d\d?\/\d\d(\d\d)?,? \d\d?:\d\d(:\d\d)?(\s+[A-Z]\w*)?\s*-?\s*/, '')
+      // nginx "37#37: *954 " worker/connection ids and the client address
+      .replace(/\b\d+#\d+: (\*\d+ )?/, '')
+      .replace(/,? client: [^,]+,/, ',')
+      // Health-check JSON: drop the components that are fine
+      .replace(/"[\w-]+":\{"status":"up"\},?/g, '')
+      .replace(/,\}/g, '}')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, MAX_SAMPLE_CHARS)
+  );
+}
+
 /**
  * Collapse a log line into a pattern so repeats group together.
  * @param {string} line
  * @returns {string}
  */
 export function logPattern(line) {
-  return (
-    line
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI color codes, which start with ESC (\x1b)
-      .replace(/\x1b\[[0-9;]*m/g, '')
-      .replace(/\d{4}-\d\d-\d\d[T ][\d:.,]+Z?/g, '<time>')
-      .replace(/\b[0-9a-f]{8,}\b/gi, '<id>')
-      .replace(/\b\d+(\.\d+)*\b/g, '<n>')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 160)
-  );
+  return readableLogLine(line)
+    .replace(/\d{4}-\d\d-\d\d[T ][\d:.,]+Z?/g, '<time>')
+    .replace(/\b[0-9a-f]{8,}\b/gi, '<id>')
+    .replace(/\b\d+(\.\d+)*\b/g, '<n>')
+    .slice(0, 160);
+}
+
+/**
+ * Shorten text for display at a word boundary, marking the cut with "…".
+ * @param {string} text
+ * @param {number} max
+ * @returns {string}
+ */
+export function clip(text, max) {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${space > max * 0.6 ? cut.slice(0, space) : cut}…`;
 }
 
 /**
@@ -134,7 +172,7 @@ export function logPattern(line) {
  * @property {Array<{ mount: string, usedPct: number, growthGbPerDay: number | null, daysToFull: number | null }>} filesystems
  * @property {{ nodeUp: boolean | null, nodeLastSeen: number | null, exporterUp: boolean | null }} reachability
  * @property {Array<{ check: string, now: number, minInWindow: number }>} healthChecks
- * @property {{ byService: Record<string, number>, errorCount: number, topErrors: Array<{ pattern: string, count: number, service: string }> } | null} logs
+ * @property {{ byService: Record<string, number>, errorCount: number, topErrors: Array<{ pattern: string, sample: string, count: number, service: string }> } | null} logs
  */
 
 /**
@@ -282,8 +320,10 @@ export async function collectHostEvidence(host, { start, end }) {
     for (const stream of errorStreams || []) {
       for (const [, line] of stream.values) {
         errorCount++;
-        const pattern = logPattern(line);
-        const g = groups.get(pattern) || { pattern, count: 0, service: stream.stream.service || 'unknown' };
+        const sample = readableLogLine(line);
+        const pattern = logPattern(sample);
+        const g = groups.get(pattern) || { pattern, sample, count: 0, service: stream.stream.service || 'unknown' };
+        g.sample = sample; // lines come oldest first, so this keeps the latest occurrence
         g.count++;
         groups.set(pattern, g);
       }
@@ -390,6 +430,18 @@ export function notableKinds(e) {
 }
 
 /**
+ * The most frequent logged error that shows something waiting (pool exhausted, timeout, ...).
+ * Matches the full sample, since a pattern can be cut before the cause.
+ * @param {HostEvidence} e
+ * @returns {{ waitingOn: { pattern: string, sample: string, count: number, service: string }, cause: string } | null}
+ */
+function waitCause(e) {
+  const waitingOn = e.logs?.topErrors.find((t) => WAIT_CAUSE_RE.test(t.sample));
+  const cause = waitingOn && WAIT_CAUSE_RE.exec(waitingOn.sample)?.[0].toLowerCase();
+  return waitingOn && cause ? { waitingOn, cause } : null;
+}
+
+/**
  * Plain-language verdict for an alert, from the evidence.
  * @param {AlertKind} kind
  * @param {HostEvidence} e
@@ -436,8 +488,7 @@ export function diagnose(kind, e) {
       };
     }
     if (busy < 0.5) {
-      const waitingOn = e.logs?.topErrors.find((t) => WAIT_CAUSE_RE.test(t.pattern));
-      const cause = waitingOn ? WAIT_CAUSE_RE.exec(waitingOn.pattern)?.[0].toLowerCase() : null;
+      const { waitingOn, cause } = waitCause(e) ?? {};
       return {
         status: 'false-alarm',
         title: 'Not real CPU pressure',
@@ -492,6 +543,19 @@ export function diagnose(kind, e) {
   }
 
   if (kind === 'exporter' && e.reachability.nodeUp && e.reachability.exporterUp === false) {
+    // The exporter asks Phoenix for its health; when Phoenix hangs, the exporter times out with it
+    const wait = waitCause(e);
+    if (wait) {
+      const poolFull = wait.cause === 'pool exhausted';
+      return {
+        status: 'action',
+        title: poolFull ? 'Database connection pool full, server is up' : 'Phoenix not answering, server is up',
+        detail: `Host metrics from ${e.host} still arrive, but Phoenix stopped answering health checks; ${wait.waitingOn.service} logged ${wait.waitingOn.count}× "${wait.cause}" at the same time.`,
+        nextStep: poolFull
+          ? 'Look for long-running queries or locks in Postgres (pg_stat_activity). If it does not recover, restart phoenix-app.'
+          : `Look into the "${wait.cause}" errors below before restarting the health exporter; it only reports what Phoenix answers.`,
+      };
+    }
     return {
       status: 'watch',
       title: 'Health exporter stuck, server is up',
