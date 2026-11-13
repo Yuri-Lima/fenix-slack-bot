@@ -236,12 +236,15 @@ Fenix can serve its tools to Claude Code over MCP (Streamable HTTP), so any Clau
 flaky tests, server health, the codebase, YouTrack issues, or Fenix's own usage, while every service token stays on
 the Fenix server.
 
-- **Read-only by design:** `READ_ONLY_TOOLS` in `agent/tools/index.js` lists what is exposed (18 tools). YouTrack
+- **Read-only by design:** `READ_ONLY_TOOLS` in `agent/tools/index.js` lists the static read-only tools (18). YouTrack
   create/update and Slack-bound tools are excluded, and every tool is marked `readOnlyHint`.
-- **One owner tool:** the static-token connection (Claude Code) also gets `slack_send_message`, from
-  `createOwnerMcpTools()`. It posts as Fenix to `me` (a DM to the owner), `#channel`, `@person`, a Slack ID, or a
-  thread given by its message link, and returns the message link. It is not marked read-only, so Claude Code asks
-  before each send. OAuth sign-ins from Claude app connectors never get it.
+- **Slack tools** (from `createSlackMcpTools()`, sharing one cached workspace directory):
+  - `slack_users` (read-only, every connection): the people Fenix can message, with handle, user ID, title,
+    active/away, custom status (vacation, sick, focus...) and when it clears, huddles, and local time.
+  - `slack_send_message` (owner only: the static-token connection): posts as Fenix to `me` (a DM to the owner),
+    `#channel`, `@person`, a Slack ID, or a thread given by its message link, and returns the message link. For a DM
+    it also notes the recipient's status. It is not marked read-only, so Claude Code asks before each send; OAuth
+    sign-ins from Claude app connectors never get it.
   Ask a session, for example: *"Write a short Slack message about today's failed builds and DM it to me."*
 - **One definition per tool:** the endpoint registers the same tool objects the Slack agent uses.
 - **Authenticated:** requests need `Authorization: Bearer <FENIX_MCP_TOKEN>` (constant-time check); anything else

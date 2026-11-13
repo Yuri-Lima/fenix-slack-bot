@@ -192,6 +192,7 @@ describe('MCP OAuth sign-in with Slack approval', () => {
     const oauthTools = (await client.listTools()).tools.map((t) => t.name);
     assert.ok(oauthTools.includes('host_health'));
     assert.ok(!oauthTools.includes('slack_send_message'), 'app sign-ins never get tools that change things');
+    assert.ok(oauthTools.includes('slack_users'), 'read-only Slack tools are served to every connection');
     await client.close();
 
     const refreshed = await (

@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createOwnerMcpTools, READ_ONLY_TOOLS } from '../agent/tools/index.js';
+import { createSlackMcpTools, READ_ONLY_TOOLS } from '../agent/tools/index.js';
 import { config } from '../config.js';
 import { buildApprovalBlocks } from '../listeners/views/mcp-oauth-approval-builder.js';
 import packageJson from '../package.json' with { type: 'json' };
@@ -49,11 +49,13 @@ const oauthErrorDetail = (body) => (body?.error ? ` error=${logSafe(body.error)}
 
 const INSTRUCTIONS =
   'Fenix is the team DevOps assistant. Use these tools for CI builds and test failures (TeamCity), flaky tests, ' +
-  'server health from Grafana metrics and logs, the GitLab codebase, YouTrack issues, and Fenix usage. ' +
+  'server health from Grafana metrics and logs, the GitLab codebase, YouTrack issues, Fenix usage, and the people ' +
+  'in Slack with their availability (slack_users). ' +
   'All tools are read-only, except where noted.';
 const OWNER_INSTRUCTIONS =
   'slack_send_message posts as Fenix to a channel, a DM or a thread. Use it when the user asks to send, post or DM ' +
-  'something in Slack; write the finished message in Slack mrkdwn first.';
+  'something in Slack; write the finished message in Slack mrkdwn first. Before DMing someone, use slack_users to ' +
+  'pick the right person and mention it to the user if they are away, on vacation or otherwise unavailable.';
 
 /**
  * Constant-time check of an Authorization header against the expected token.
@@ -68,18 +70,18 @@ export function isAuthorized(header, token) {
 }
 
 /**
- * An MCP server exposing the read-only tools, plus `ownerTools` (which change things)
- * when the caller is the owner. Each call is recorded in the usage log.
- * @param {any[]} [ownerTools] - from createOwnerMcpTools(); only for the static-token connection
+ * An MCP server exposing the read-only tools (plus `readOnly` extras such as slack_users), and
+ * `owner` tools (which change things) when the caller is the owner. Each call is recorded in the usage log.
+ * @param {{ readOnly?: any[], owner?: any[] }} [extra] - from createSlackMcpTools(); `owner` only for the static-token connection
  * @returns {McpServer}
  */
-export function buildMcpServer(ownerTools = []) {
+export function buildMcpServer({ readOnly = [], owner: ownerTools = [] } = {}) {
   const server = new McpServer(
     { name: 'fenix', version: packageJson.version },
     { instructions: ownerTools.length ? `${INSTRUCTIONS} ${OWNER_INSTRUCTIONS}` : INSTRUCTIONS },
   );
   const tools = [
-    ...READ_ONLY_TOOLS.map((t) => ({ t, annotations: { readOnlyHint: true } })),
+    ...[...READ_ONLY_TOOLS, ...readOnly].map((t) => ({ t, annotations: { readOnlyHint: true } })),
     ...ownerTools.map((t) => ({
       t,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
@@ -210,7 +212,7 @@ export function startMcpServer(logger, slack) {
   const oauth = Boolean(publicUrl && slack && config.ownerIds.length);
   const challenge = oauth ? `Bearer resource_metadata="${publicUrl}/.well-known/oauth-protected-resource"` : 'Bearer';
   // Created once so their Slack directory caches outlive a single stateless request
-  const ownerTools = slack ? createOwnerMcpTools(slack) : [];
+  const slackTools = slack ? createSlackMcpTools(slack) : { readOnly: [], owner: [] };
 
   const http = createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost');
@@ -295,7 +297,7 @@ export function startMcpServer(logger, slack) {
         res.writeHead(405, { Allow: 'POST' }).end();
         return;
       }
-      const server = buildMcpServer(isOwner ? ownerTools : []);
+      const server = buildMcpServer(isOwner ? slackTools : { readOnly: slackTools.readOnly });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => {
         void transport.close();

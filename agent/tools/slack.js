@@ -57,12 +57,19 @@ function explainSlackError(code, target) {
 }
 
 /**
- * Tool that posts a message as Fenix to a channel, a DM or a thread. It changes
- * something, so it is never in READ_ONLY_TOOLS: the MCP server offers it only to
- * the owner's static-token connection.
- * @param {import('@slack/web-api').WebClient} client
+ * @typedef {object} SlackDirectory
+ * @property {(name: string) => Promise<string | undefined>} channelId - channel ID by name (without #)
+ * @property {() => Promise<any[]>} members - active people in the workspace (no bots, no deactivated accounts)
+ * @property {(name: string) => Promise<any[]>} findMembers - people whose handle, display or real name equals `name`
  */
-export function createSlackSendMessageTool(client) {
+
+/**
+ * Workspace channels and people, cached for DIRECTORY_TTL_MS. One directory is
+ * shared by the Slack tools so they ask Slack once.
+ * @param {import('@slack/web-api').WebClient} client
+ * @returns {SlackDirectory}
+ */
+export function createSlackDirectory(client) {
   /** @type {{ at: number, byName: Map<string, string> }} channel name -> ID */
   const channels = { at: 0, byName: new Map() };
   /** @type {{ at: number, members: any[] }} */
@@ -88,25 +95,144 @@ export function createSlackSendMessageTool(client) {
     return channels.byName.get(name.toLowerCase());
   }
 
-  /** @param {string} name */
-  async function memberIds(name) {
+  async function members() {
     if (Date.now() - people.at > DIRECTORY_TTL_MS) {
-      people.members = [];
+      /** @type {any[]} */
+      const found = [];
       let cursor;
       do {
         const page = await client.users.list({ limit: 1000, cursor });
-        people.members.push(...(page.members || []).filter((m) => !m.deleted && !m.is_bot && m.id !== 'USLACKBOT'));
+        found.push(...(page.members || []).filter((m) => !m.deleted && !m.is_bot && m.id !== 'USLACKBOT'));
         cursor = page.response_metadata?.next_cursor || undefined;
       } while (cursor);
+      people.members = found;
       people.at = Date.now();
     }
-    const wanted = name.toLowerCase();
-    return people.members
-      .filter((m) =>
-        [m.name, m.profile?.display_name, m.profile?.real_name, m.real_name].some((n) => n?.toLowerCase() === wanted),
-      )
-      .map((m) => ({ id: m.id, name: m.real_name || m.name }));
+    return people.members;
   }
+
+  /** @param {string} name */
+  async function findMembers(name) {
+    const wanted = name.toLowerCase();
+    return (await members()).filter((m) =>
+      [m.name, m.profile?.display_name, m.profile?.real_name, m.real_name].some((n) => n?.toLowerCase() === wanted),
+    );
+  }
+
+  return { channelId, members, findMembers };
+}
+
+/** Most people slack_users looks up presence for (one Slack call each). */
+export const MAX_PRESENCE_LOOKUPS = 25;
+
+/**
+ * Read-only tool listing the people Fenix can message, with what Slack knows
+ * about their availability: active/away, custom status (vacation, sick, focus...)
+ * and when it clears, huddles, and their local time.
+ * @param {import('@slack/web-api').WebClient} client
+ * @param {SlackDirectory} [directory] - shared with slack_send_message; a private one by default
+ */
+export function createSlackUsersTool(client, directory = createSlackDirectory(client)) {
+  return tool(
+    'slack_users',
+    'List the people in the Slack workspace that Fenix can message, with their handle, user ID, title, ' +
+      'whether they are active or away, their status (vacation, sick, focus...) and until when, huddles, and their ' +
+      'local time. Use it before DMing someone, to pick the right person and check they are around.',
+    {
+      query: z
+        .string()
+        .optional()
+        .describe('Only people whose name, handle or title contains this text. Leave out to list everyone.'),
+    },
+    async ({ query }) => {
+      try {
+        const wanted = (query || '').trim().toLowerCase().replace(/^@/, '');
+        const people = (await directory.members())
+          .filter(
+            (m) =>
+              !wanted ||
+              [m.name, m.real_name, m.profile?.display_name, m.profile?.title].some((v) =>
+                v?.toLowerCase().includes(wanted),
+              ),
+          )
+          .sort((a, b) => personName(a).localeCompare(personName(b)));
+        if (!people.length) return textResult(query ? `Nobody matches "${query}".` : 'No people found.');
+
+        const withPresence = people.length <= MAX_PRESENCE_LOOKUPS;
+        const presence = withPresence
+          ? await Promise.all(
+              people.map((m) =>
+                client.users
+                  .getPresence({ user: m.id })
+                  .then((r) => r.presence)
+                  .catch(() => undefined),
+              ),
+            )
+          : [];
+        const now = new Date();
+        const lines = people.map((m, i) => {
+          const local = m.tz
+            ? `${now.toLocaleTimeString('en-GB', { timeZone: m.tz, hour: '2-digit', minute: '2-digit' })} local (${m.tz})`
+            : '';
+          const facts = [
+            presence[i],
+            describeStatus(m),
+            local,
+            m.is_restricted ? 'guest' : '',
+            m.id === config.ownerIds[0] ? "bot owner, 'me'" : '',
+          ].filter(Boolean);
+          const title = m.profile?.title ? `, ${m.profile.title}` : '';
+          return `• ${personName(m)} (@${m.name}, ${m.id}${title}): ${facts.join(' · ')}`;
+        });
+        const note = withPresence
+          ? ''
+          : `\nActive/away is shown only for ${MAX_PRESENCE_LOOKUPS} people or fewer; narrow the query.`;
+        return textResult(`${people.length} ${people.length === 1 ? 'person' : 'people'}:\n${lines.join('\n')}${note}`);
+      } catch (e) {
+        return textResult(`Could not list Slack users: ${e}`, true);
+      }
+    },
+  );
+}
+
+/** @param {any} member */
+const personName = (member) => member.real_name || member.profile?.real_name || member.name || member.id;
+
+/**
+ * A person's Slack status in words: custom status (with when it clears) and huddle.
+ * Empty when they have none.
+ * @param {any} member - users.list member
+ * @returns {string}
+ */
+export function describeStatus(member) {
+  const p = member.profile || {};
+  const parts = [];
+  if (p.status_text || p.status_emoji) {
+    const until = p.status_expiration
+      ? ` until ${new Date(p.status_expiration * 1000).toLocaleString('en-GB', {
+          timeZone: member.tz || config.timeZone,
+          weekday: 'short',
+          day: 'numeric',
+          month: 'short',
+          hour: '2-digit',
+          minute: '2-digit',
+        })}`
+      : '';
+    parts.push(`status ${[p.status_emoji, p.status_text].filter(Boolean).join(' ')}${until}`);
+  }
+  if (p.huddle_state === 'in_a_huddle') parts.push('in a huddle');
+  return parts.join(', ');
+}
+
+/**
+ * Tool that posts a message as Fenix to a channel, a DM or a thread. It changes
+ * something, so it is never in READ_ONLY_TOOLS: the MCP server offers it only to
+ * the owner's static-token connection.
+ * @param {import('@slack/web-api').WebClient} client
+ * @param {SlackDirectory} [directory] - shared with slack_users; a private one by default
+ */
+export function createSlackSendMessageTool(client, directory = createSlackDirectory(client)) {
+  const { channelId, findMembers } = directory;
 
   /**
    * Resolve where to post. Returns the Slack channel (a user ID posts to the DM with Fenix).
@@ -120,11 +246,11 @@ export function createSlackSendMessageTool(client) {
     }
     if (SLACK_ID.test(value)) return { channel: value };
     if (value.startsWith('@')) {
-      const matches = await memberIds(value.slice(1));
+      const matches = await findMembers(value.slice(1));
       if (matches.length === 1) return { channel: matches[0].id };
       if (matches.length > 1) {
         return {
-          error: `"${value}" matches ${matches.map((m) => `${m.name} (${m.id})`).join(', ')}. Use the user ID.`,
+          error: `"${value}" matches ${matches.map((m) => `${personName(m)} (${m.id})`).join(', ')}. Use the user ID.`,
         };
       }
       return { error: `No workspace member is called "${value.slice(1)}". Use their Slack handle or user ID.` };
@@ -191,7 +317,13 @@ export function createSlackSendMessageTool(client) {
           })
           .then((r) => r.permalink)
           .catch(() => null);
-        return textResult(`Sent to ${where}${threadRef ? ' (in thread)' : ''}.${link ? ` ${link}` : ''}`);
+        const sent = `Sent to ${where}${threadRef ? ' (in thread)' : ''}.${link ? ` ${link}` : ''}`;
+        // For a DM, say if the person has a status (vacation, sick, focus...) so the user knows
+        const person = /^[UW]/.test(/** @type {string} */ (channel))
+          ? (await directory.members().catch(() => [])).find((m) => m.id === channel)
+          : null;
+        const status = person ? describeStatus(person) : '';
+        return textResult(status ? `${sent}\nNote: ${personName(person)} has ${status}.` : sent);
       } catch (e) {
         const code = /** @type {any} */ (e).data?.error;
         return textResult(code ? explainSlackError(code, where) : `Could not send the message: ${e}`, true);

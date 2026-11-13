@@ -1,11 +1,19 @@
 import assert from 'node:assert';
 import { beforeEach, describe, it, mock } from 'node:test';
 
-import { createSlackSendMessageTool, parseThreadRef } from '../../../agent/tools/slack.js';
+import {
+  createSlackDirectory,
+  createSlackSendMessageTool,
+  createSlackUsersTool,
+  describeStatus,
+  parseThreadRef,
+} from '../../../agent/tools/slack.js';
 
 const LINK = 'https://acme.slack.com/archives/C0NEWS/p1794486526038069';
+/** 20 Nov 2026 17:00 in Berlin. */
+const VACATION_ENDS = Date.UTC(2026, 10, 20, 16, 0) / 1000;
 
-/** A Slack client with one public channel, two people and a working postMessage. */
+/** A Slack client with two channels, three people (one on vacation, one in a huddle) and a working postMessage. */
 function fakeSlack() {
   return {
     conversations: {
@@ -16,11 +24,26 @@ function fakeSlack() {
       ),
     },
     users: {
+      getPresence: mock.fn(async ({ user }) => ({ presence: user === 'U0SAM' ? 'active' : 'away' })),
       list: mock.fn(async () => ({
         members: [
-          { id: 'U0ALEX', name: 'alex', real_name: 'Alex R', profile: { display_name: 'Alex' } },
+          {
+            id: 'U0ALEXR01',
+            name: 'alex',
+            real_name: 'Alex R',
+            tz: 'Europe/Berlin',
+            profile: {
+              display_name: 'Alex',
+              title: 'QA',
+              status_emoji: ':palm_tree:',
+              status_text: 'Vacation',
+              status_expiration: VACATION_ENDS,
+            },
+          },
           { id: 'U0ALEX2', name: 'alex.b', real_name: 'Alex B', profile: { display_name: 'Alex' } },
-          { id: 'U0SAM', name: 'sam', real_name: 'Sam H', profile: { display_name: '' } },
+          { id: 'U0SAM', name: 'sam', real_name: 'Sam H', profile: { display_name: '', huddle_state: 'in_a_huddle' } },
+          { id: 'U0OWNER', name: 'owner', real_name: 'Olivia Owner', tz: 'Europe/Berlin', profile: {} },
+          { id: 'B0BOT', name: 'somebot', is_bot: true, profile: {} },
           { id: 'U0GONE', name: 'gone', deleted: true },
         ],
       })),
@@ -89,7 +112,7 @@ describe('slack_send_message', () => {
     assert.strictEqual(slack.chat.postMessage.mock.calls[0].arguments[0].channel, 'U0SAM');
     const r = await send(slack, { to: '@Alex', text: 'hi' });
     assert.ok(r.isError);
-    assert.match(r.content[0].text, /U0ALEX.*U0ALEX2/);
+    assert.match(r.content[0].text, /U0ALEXR01.*U0ALEX2/);
     assert.strictEqual(slack.chat.postMessage.mock.callCount(), 1);
   });
 
@@ -123,5 +146,69 @@ describe('slack_send_message', () => {
     const r = await send(slack, { text: 'x' });
     assert.ok(r.isError);
     assert.strictEqual(slack.chat.postMessage.mock.callCount(), 0);
+  });
+});
+
+describe('describeStatus', () => {
+  it("describes a custom status with when it clears, in the person's time zone, and huddles", () => {
+    assert.strictEqual(
+      describeStatus({
+        tz: 'Europe/Berlin',
+        profile: { status_emoji: ':palm_tree:', status_text: 'Vacation', status_expiration: VACATION_ENDS },
+      }),
+      'status :palm_tree: Vacation until Fri 20 Nov, 17:00',
+    );
+    assert.strictEqual(describeStatus({ profile: { huddle_state: 'in_a_huddle' } }), 'in a huddle');
+    assert.strictEqual(describeStatus({ profile: {} }), '');
+  });
+});
+
+describe('slack_users', () => {
+  /** @type {ReturnType<typeof fakeSlack>} */
+  let slack;
+  beforeEach(() => {
+    slack = fakeSlack();
+  });
+
+  /** @param {object} args */
+  const users = (args) => createSlackUsersTool(/** @type {any} */ (slack)).handler(args, {});
+
+  it('lists active people with presence, status, local time and the owner, leaving out bots and deactivated accounts', async () => {
+    const r = await users({});
+    assert.ok(!r.isError, r.content[0].text);
+    const text = r.content[0].text;
+    assert.match(text, /^4 people:/);
+    assert.match(
+      text,
+      /• Alex R \(@alex, U0ALEXR01, QA\): away · status :palm_tree: Vacation until Fri 20 Nov, 17:00 · \d\d:\d\d local \(Europe\/Berlin\)/,
+    );
+    assert.match(text, /• Sam H \(@sam, U0SAM\): active · in a huddle/);
+    assert.match(text, /• Olivia Owner .*bot owner, 'me'/);
+    assert.ok(!text.includes('somebot') && !text.includes('U0GONE'));
+    assert.strictEqual(slack.users.getPresence.mock.callCount(), 4);
+  });
+
+  it('filters by name, handle or title', async () => {
+    const text = (await users({ query: '@sam' })).content[0].text;
+    assert.match(text, /^1 person:\n• Sam H/);
+    assert.match((await users({ query: 'qa' })).content[0].text, /^1 person:\n• Alex R/);
+    assert.match((await users({ query: 'nobody' })).content[0].text, /Nobody matches/);
+  });
+
+  it('shares one directory with slack_send_message', async () => {
+    const directory = createSlackDirectory(/** @type {any} */ (slack));
+    await createSlackUsersTool(/** @type {any} */ (slack), directory).handler({}, {});
+    await createSlackSendMessageTool(/** @type {any} */ (slack), directory).handler({ to: '@sam', text: 'hi' }, {});
+    assert.strictEqual(slack.users.list.mock.callCount(), 1);
+  });
+});
+
+describe('slack_send_message and recipient status', () => {
+  it('notes when the person it DMed has a status', async () => {
+    const slack = fakeSlack();
+    const r = await send(slack, { to: 'U0ALEXR01', text: 'hi' });
+    assert.match(r.content[0].text, /\nNote: Alex R has status :palm_tree: Vacation until Fri 20 Nov, 17:00\.$/);
+    const quiet = await send(slack, { to: '#random', text: 'hi' });
+    assert.ok(!quiet.content[0].text.includes('Note:'));
   });
 });
