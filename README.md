@@ -181,19 +181,21 @@ firing host (up to three per message) it then pulls, read-only through a Grafana
   (pool exhausted, timeouts, connection resets) linked to the verdict.
 - **Recurrence:** how often the same rule fired for the host in the last 24 hours and 7 days.
 
-The reply leads with a one-line verdict and ends with a next step:
+Each host gets a compact Block Kit card. A status emoji in the header says how urgent it is (🔴 down,
+🟠 needs action, 🟡 worth a look, 🟢 false alarm), and each metric always uses the same icon:
 
 ```text
-🔍 High System Load Over All CPU Cores Together
+🟢 app-01 · Not real CPU pressure
+High System Load Over All CPU Cores Together · 🕒 since 23:42 · 🔁 4th time in 24 h · 12× in 7 days
+Load 12.6 on 2 CPUs (629%), but the CPU was 86% idle. Tasks were waiting, not computing.
 
-app-01 · since 23:42 · 4th time in 24 h, 12× in 7 days
-Not real CPU pressure: load reached 12.6 on 2 CPUs (629%), but the CPU was 86% idle, with no disk
-wait and no steal. The load average was inflated by tasks waiting without using CPU or disk.
-• CPU (2 cores): user 9% · system 4% · disk wait 0% · steal 0% · idle 86%
-• Load: peak 12.6 at 23:32 · processes up to 10 running, 0 blocked
-• Memory: up to 67% used · swap 213 → 212 MB · disk busy up to 0%
-• Logs: 12,548 lines (phoenix-worker 12,286, …) · 25 error lines
-Next step: Alerting on CPU utilisation instead of load average would remove this false alarm.
+🧠 CPU             14% busy of 2 cores      📈 Load      peak 12.6 at 23:32 · 10 running
+💾 Memory          67% used · swap flat      💽 Disk      busy 0%
+🩺 Phoenix checks  all 6 healthy             📜 Logs      12.5k lines · 25 errors
+
+⚠️ Top errors
+> 10× phx-app  recv() failed (Connection reset by peer) while reading response header …
+👉 Next step: Change the rule to measure CPU use instead of load average.
 ```
 
 Five or more hosts in one alert line are treated as one fleet-wide event (network, monitoring, or a shared

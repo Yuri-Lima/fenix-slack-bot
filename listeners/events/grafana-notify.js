@@ -1,5 +1,5 @@
 import { config } from '../../config.js';
-import { alertKind, clock, collectHostEvidence, diagnose } from '../../integrations/host-health.js';
+import { alertKind, clock, collectHostEvidence, diagnose, VERDICT_STATUS } from '../../integrations/host-health.js';
 import { andMore } from '../../utils/helpers.js';
 
 // Explains Grafana alerts posted by the Grafana Slack app. Each firing host gets
@@ -158,126 +158,184 @@ const ordinal = (n) => {
 };
 /** @param {number} share */
 const pct = (share) => `${Math.round(share * 100)}%`;
+/** @param {number} n */
+const compact = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n));
 
 /**
- * Evidence bullets for one host.
+ * Metric fields for the two-column grid. One emoji per kind of metric, always the same.
  * @param {import('../../integrations/host-health.js').HostEvidence} e
  * @param {import('../../integrations/host-health.js').AlertKind} kind
- * @returns {string[]}
+ * @returns {string[]} mrkdwn field texts
  */
-export function evidenceLines(e, kind) {
-  const lines = [];
+export function evidenceFields(e, kind) {
+  const fields = [];
   const reachable = e.reachability.nodeUp !== false;
-  if (reachable && e.cpu && e.cpus) {
-    lines.push(
-      `• CPU (${e.cpus} cores): user ${pct(e.cpu.user)} · system ${pct(e.cpu.system)} · disk wait ${pct(e.cpu.iowait)} · steal ${pct(e.cpu.steal)} · idle ${pct(e.cpu.idle)}`,
+  if (!reachable) {
+    fields.push(
+      `:electric_plug: *Last seen*\n${e.reachability.nodeLastSeen ? clock(e.reachability.nodeLastSeen) : 'not in this window'}`,
     );
   }
+  if (reachable && e.cpu && e.cpus) {
+    const extra = [
+      e.cpu.iowait >= 0.05 && `disk wait ${pct(e.cpu.iowait)}`,
+      e.cpu.steal >= 0.05 && `steal ${pct(e.cpu.steal)}`,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    fields.push(`:brain: *CPU*\n${pct(1 - e.cpu.idle)} busy of ${e.cpus} cores${extra ? ` · ${extra}` : ''}`);
+  }
   if (reachable && e.load1) {
-    lines.push(
-      `• Load: peak ${e.load1.max.toFixed(1)} at ${clock(e.load1.at)} · processes up to ${e.procsRunningMax ?? '?'} running, ${e.procsBlockedMax ?? '?'} blocked`,
+    fields.push(
+      `:chart_with_upwards_trend: *Load*\npeak ${e.load1.max.toFixed(1)} at ${clock(e.load1.at)} · ${e.procsRunningMax ?? '?'} running`,
     );
   }
   if (reachable && e.memUsedPctMax !== null) {
-    const swap = e.swap ? ` · swap ${Math.round(e.swap.startMb)} → ${Math.round(e.swap.endMb)} MB` : '';
-    lines.push(
-      `• Memory: up to ${Math.round(e.memUsedPctMax)}% used${swap} · disk busy up to ${Math.round(e.diskBusyPctMax ?? 0)}%`,
-    );
+    const swapDelta = e.swap ? Math.round(e.swap.endMb - e.swap.startMb) : null;
+    const swap =
+      swapDelta === null
+        ? ''
+        : ` · swap ${Math.abs(swapDelta) < 20 ? 'flat' : `${swapDelta > 0 ? '+' : ''}${swapDelta} MB`}`;
+    fields.push(`:floppy_disk: *Memory*\n${Math.round(e.memUsedPctMax)}% used${swap}`);
   }
-  const fullish = e.filesystems.filter((f) => kind === 'disk' || f.usedPct >= 80);
-  for (const f of fullish.slice(0, 3)) {
-    const growth =
-      f.growthGbPerDay !== null ? `, ${f.growthGbPerDay >= 0 ? '+' : ''}${f.growthGbPerDay.toFixed(1)} GB/24 h` : '';
-    lines.push(`• Disk \`${f.mount}\`: ${Math.round(f.usedPct)}% used${growth}`);
+  if (reachable && (e.diskBusyPctMax !== null || e.filesystems.length)) {
+    const fullest = [...e.filesystems].sort((a, b) => b.usedPct - a.usedPct)[0];
+    const parts = [
+      e.diskBusyPctMax !== null && `busy ${Math.round(e.diskBusyPctMax)}%`,
+      fullest &&
+        (kind === 'disk' || fullest.usedPct >= 80 ? `\`${fullest.mount}\` ${Math.round(fullest.usedPct)}% full` : null),
+    ].filter(Boolean);
+    if (parts.length) fields.push(`:minidisc: *Disk*\n${parts.join(' · ')}`);
   }
   // Health values are stale when the exporter that reports them is down
   if (e.healthChecks.length && e.reachability.exporterUp !== false) {
     const down = e.healthChecks.filter((c) => c.minInWindow === 0);
-    lines.push(
-      down.length
-        ? `• Phoenix checks: ${down.map((c) => `\`${c.check}\` ${c.now === 0 ? 'down' : 'recovered'}`).join(', ')}`
-        : `• Phoenix checks: all ${e.healthChecks.length} healthy`,
+    fields.push(
+      `:stethoscope: *Phoenix checks*\n${
+        down.length
+          ? down.map((c) => `\`${c.check}\` ${c.now === 0 ? 'down' : 'recovered'}`).join(', ')
+          : `all ${e.healthChecks.length} healthy`
+      }`,
     );
+  } else if (e.reachability.exporterUp === false) {
+    fields.push(':stethoscope: *Phoenix checks*\nexporter not answering');
   }
   if (e.logs) {
     const total = Object.values(e.logs.byService).reduce((a, b) => a + b, 0);
-    const services = Object.entries(e.logs.byService)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([s, n]) => `${s} ${n.toLocaleString('en')}`)
-      .join(', ');
-    lines.push(
-      `• Logs: ${total.toLocaleString('en')} lines${services ? ` (${services})` : ''} · ${e.logs.errorCount} error lines`,
-    );
-    for (const t of e.logs.topErrors.slice(0, 2)) {
-      lines.push(`   ↳ ${t.count}× _${t.service}_: \`${t.pattern.replace(/`/g, "'")}\``);
-    }
+    fields.push(`:scroll: *Logs*\n${compact(total)} lines · ${e.logs.errorCount} errors`);
   }
-  return lines;
+  return fields;
 }
 
+/** @typedef {import('@slack/types').KnownBlock} Block */
+
+/** @param {string} text */
+const context = (text) => /** @type {Block} */ ({ type: 'context', elements: [{ type: 'mrkdwn', text }] });
+/** @param {string} text */
+const section = (text) => /** @type {Block} */ ({ type: 'section', text: { type: 'mrkdwn', text } });
+
 /**
- * Build the analysis message for one Grafana notification.
+ * Build the analysis for one Grafana notification as Block Kit blocks, plus a
+ * plain-text fallback for notifications and clients without blocks.
  * @param {ParsedAlert} alert
  * @param {Array<{ entry: AlertEntry, host: string, evidence: import('../../integrations/host-health.js').HostEvidence | null }>} analysed
  * @param {Map<string, { day: number, week: number }>} history
- * @returns {string | null}
+ * @returns {{ text: string, blocks: Block[] } | null}
  */
 export function formatGrafanaAnalysis(alert, analysed, history) {
   const kind = alertKind(alert.rule);
-  const lines = [`:mag: *${alert.rule}*`];
+  /** @type {Block[]} */
+  const blocks = [];
+  /** @type {string[]} */
+  const summary = [];
 
   for (const entry of alert.entries.filter((e) => e.hosts.length >= FLEET_EVENT_MIN_HOSTS)) {
+    const firing = entry.state === 'firing';
     const shown = entry.hosts
       .slice(0, 6)
       .map((h) => `\`${h}\``)
       .join(', ');
-    lines.push(
-      '',
-      `:globe_with_meridians: *${entry.hosts.length} hosts ${entry.state === 'firing' ? 'started' : 'recovered'} at once${entry.shownTime ? ` at ${entry.shownTime}` : ''}* (${shown}${entry.hosts.length > 6 ? `, +${entry.hosts.length - 6}` : ''}).`,
-      entry.state === 'firing'
-        ? 'So many servers failing together points to one central cause (network, the monitoring stack or a shared dependency), not separate server problems. Check that first.'
-        : 'They recovered together, which confirms one shared cause.',
+    const more = entry.hosts.length > 6 ? ` and ${entry.hosts.length - 6} more` : '';
+    const title = `${entry.hosts.length} servers ${firing ? 'failing' : 'recovered'} at once`;
+    if (blocks.length) blocks.push({ type: 'divider' });
+    blocks.push(
+      { type: 'header', text: { type: 'plain_text', text: `:globe_with_meridians: ${title}`, emoji: true } },
+      context(`*${alert.rule}*${entry.shownTime ? `  ·  :clock3: ${entry.shownTime}` : ''}`),
+      section(
+        firing
+          ? `So many servers at the same moment points to *one shared cause*: the network, the monitoring stack, or a shared dependency.\n${shown}${more}`
+          : `They recovered together, which confirms one shared cause.\n${shown}${more}`,
+      ),
     );
+    if (firing)
+      blocks.push(section(':point_right: *Next step:* Check the shared cause first, not the individual servers.'));
+    summary.push(`🌐 ${title}`);
   }
 
   for (const { entry, host, evidence } of analysed) {
     const seen = history.get(entry.hosts[0]);
     const repeat =
       seen && seen.week > 0
-        ? ` · ${ordinal(seen.day + 1)} time in 24 h, ${seen.week + 1}× in ${HISTORY_DAYS} days`
-        : ' · first time this week';
-    lines.push('', `*${host}* · since ${entry.shownTime ?? '?'}${repeat}`);
+        ? `:repeat: ${ordinal(seen.day + 1)} time in 24 h · ${seen.week + 1}× in ${HISTORY_DAYS} days`
+        : ':new: first time this week';
+    const meta = `*${alert.rule}*  ·  :clock3: since ${entry.shownTime ?? '?'}  ·  ${repeat}`;
+    if (blocks.length) blocks.push({ type: 'divider' });
+
     if (!evidence) {
-      lines.push('_Could not load metrics for this host from Grafana._');
+      blocks.push(
+        { type: 'header', text: { type: 'plain_text', text: `:grey_question: ${host} · no data`, emoji: true } },
+        context(meta),
+        section('Could not load metrics for this server from Grafana.'),
+      );
+      summary.push(`${host}: no data`);
       continue;
     }
-    const { verdict, nextStep } = diagnose(kind, evidence);
-    lines.push(verdict, ...evidenceLines(evidence, kind), `*Next step:* ${nextStep}`);
+
+    const v = diagnose(kind, evidence);
+    const status = VERDICT_STATUS[v.status];
+    blocks.push(
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: `${status.emoji} ${host} · ${v.title}`.slice(0, 150), emoji: true },
+      },
+      context(meta),
+      section(v.detail),
+    );
+    const fields = evidenceFields(evidence, kind);
+    if (fields.length) {
+      blocks.push({ type: 'section', fields: fields.slice(0, 10).map((text) => ({ type: 'mrkdwn', text })) });
+    }
+    const errors = evidence.logs?.topErrors.slice(0, 2) || [];
+    if (errors.length) {
+      blocks.push(
+        section(
+          `:warning: *Top errors*\n${errors.map((t) => `> ${t.count}× _${t.service}_  \`${t.pattern.replace(/`/g, "'").slice(0, 120)}\``).join('\n')}`,
+        ),
+      );
+    }
+    blocks.push(section(`:point_right: *Next step:* ${v.nextStep}`));
+    summary.push(`${host}: ${v.title} (${status.label})`);
   }
 
   const notAnalysed = alert.entries.filter(
     (e) => e.state === 'firing' && e.hosts.length < FLEET_EVENT_MIN_HOSTS && !analysed.some((a) => a.entry === e),
   );
   if (notAnalysed.length) {
-    lines.push('', `Also firing: ${notAnalysed.map((e) => `\`${e.hosts[0]}\``).join(', ')}`);
+    blocks.push(context(`Also firing: ${notAnalysed.map((e) => `\`${e.hosts[0]}\``).join(', ')}`));
   }
 
   // Recoveries are only worth a line next to something that is still firing
   const resolved = alert.entries.filter((e) => e.state === 'resolved' && e.hosts.length < FLEET_EVENT_MIN_HOSTS);
-  if (resolved.length && lines.length > 1) {
-    lines.push('');
-    for (const e of resolved.slice(0, 10)) {
+  if (resolved.length && blocks.length) {
+    const lines = resolved.slice(0, 10).map((e) => {
       const mins = e.start && e.end ? Math.max(1, Math.round((e.end - e.start) / 60)) : null;
-      lines.push(
-        `:white_check_mark: \`${e.hosts[0]}\` recovered${e.shownTime ? ` at ${e.shownTime}` : ''}${mins ? ` after ${mins} min` : ''}`,
-      );
-    }
-    const more = andMore(resolved.length, 10);
-    if (more) lines.push(more);
+      return `:white_check_mark: \`${e.hosts[0]}\` recovered${e.shownTime ? ` at ${e.shownTime}` : ''}${mins ? ` after ${mins} min` : ''}`;
+    });
+    const more = andMore(resolved.length, 10, '');
+    blocks.push(context([...lines, ...(more ? [more] : [])].join('\n')));
   }
 
-  return lines.length > 1 ? lines.join('\n') : null;
+  if (blocks.length === 0) return null;
+  return { text: `${alert.rule}: ${summary.join('; ')}`, blocks };
 }
 
 /**
@@ -317,18 +375,30 @@ export async function handleGrafanaNotify({ client, event, logger }) {
       message.ts,
     ).catch(() => new Map());
 
-    const text = formatGrafanaAnalysis(alert, analysed, history);
-    if (!text) return;
+    const analysis = formatGrafanaAnalysis(alert, analysed, history);
+    if (!analysis) return;
+    const { text, blocks } = analysis;
 
     if (replyMode === 'thread') {
-      await client.chat.postMessage({ channel: message.channel, thread_ts: message.ts, text, unfurl_links: false });
+      await client.chat.postMessage({
+        channel: message.channel,
+        thread_ts: message.ts,
+        text,
+        blocks,
+        unfurl_links: false,
+      });
     } else if (config.adminDmChannel) {
       const link = await client.chat
         .getPermalink({ channel: message.channel, message_ts: message.ts })
         .then((r) => r.permalink)
         .catch(() => null);
-      const header = `_Preview of the analysis for <${link || '#'}|this Grafana alert>. Not posted in the channel._\n`;
-      await client.chat.postMessage({ channel: config.adminDmChannel, text: header + text, unfurl_links: false });
+      const preview = context(`:eyes: Preview for <${link || '#'}|this Grafana alert>. Not posted in the channel.`);
+      await client.chat.postMessage({
+        channel: config.adminDmChannel,
+        text,
+        blocks: [preview, ...blocks],
+        unfurl_links: false,
+      });
     }
   } catch (e) {
     logger.error(`Grafana alert analysis failed for "${alert.rule}": ${e}`);

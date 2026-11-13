@@ -103,6 +103,16 @@ describe('targetHost', () => {
   });
 });
 
+/** All visible text of a Block Kit message, for matching. */
+const render = (out) =>
+  out.blocks
+    .map((b) =>
+      [b.text?.text, ...(b.fields || []).map((f) => f.text), ...(b.elements || []).map((el) => el.text)]
+        .filter(Boolean)
+        .join('\n'),
+    )
+    .join('\n');
+
 describe('formatGrafanaAnalysis', () => {
   const evidence = {
     host: 'alpha',
@@ -125,22 +135,25 @@ describe('formatGrafanaAnalysis', () => {
 
   it('explains a firing host with verdict, evidence, repeat count, and next step', () => {
     const alert = parseGrafanaAlert(firingLoad);
-    const text = formatGrafanaAnalysis(
+    const out = formatGrafanaAnalysis(
       alert,
       [{ entry: alert.entries[0], host: 'alpha', evidence }],
       new Map([['alpha', { day: 2, week: 11 }]]),
     );
-    assert.match(text, /\*alpha\* · since 08:25 · 3rd time in 24 h, 12× in 7 days/);
-    assert.match(text, /Not real CPU pressure/);
-    assert.match(text, /CPU \(2 cores\): user 11%/);
-    assert.match(text, /\*Next step:\*/);
+    const header = out.blocks.find((b) => b.type === 'header');
+    assert.strictEqual(header.text.text, ':large_green_circle: alpha · Not real CPU pressure');
+    const text = render(out);
+    assert.match(text, /since 08:25 {2}· {2}:repeat: 3rd time in 24 h · 12× in 7 days/);
+    assert.match(text, /:brain: \*CPU\*\n17% busy of 2 cores/);
+    assert.match(text, /:point_right: \*Next step:\*/);
     assert.match(text, /`beta` recovered at 08:20 after 15 min/);
+    assert.match(out.text, /alpha: Not real CPU pressure \(False alarm\)/);
   });
 
   it('reports a fleet-wide event as one central cause', () => {
-    const text = formatGrafanaAnalysis(parseGrafanaAlert(fleet), [], new Map());
-    assert.match(text, /7 hosts started at once at 02:05/);
-    assert.match(text, /one central cause/);
+    const out = formatGrafanaAnalysis(parseGrafanaAlert(fleet), [], new Map());
+    assert.strictEqual(out.blocks[0].text.text, ':globe_with_meridians: 7 servers failing at once');
+    assert.match(render(out), /one shared cause/);
   });
 
   it('stays silent for messages that only report recoveries', () => {

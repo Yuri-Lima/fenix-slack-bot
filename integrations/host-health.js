@@ -331,125 +331,167 @@ function checkName(metric) {
 const pct = (/** @type {number} */ share) => `${Math.round(share * 100)}%`;
 
 /**
+ * How urgent a verdict is. One emoji per status, used the same way everywhere.
+ * @type {Record<'down' | 'action' | 'watch' | 'false-alarm', { emoji: string, label: string }>}
+ */
+export const VERDICT_STATUS = {
+  down: { emoji: ':red_circle:', label: 'Down' },
+  action: { emoji: ':large_orange_circle:', label: 'Needs action' },
+  watch: { emoji: ':large_yellow_circle:', label: 'Worth a look' },
+  'false-alarm': { emoji: ':large_green_circle:', label: 'False alarm' },
+};
+
+/**
+ * @typedef {Object} Verdict
+ * @property {keyof typeof VERDICT_STATUS} status
+ * @property {string} title - A few words, e.g. "Not real CPU pressure"
+ * @property {string} detail - One or two plain sentences with the key numbers
+ * @property {string} nextStep
+ */
+
+/**
  * Plain-language verdict for an alert, from the evidence.
  * @param {AlertKind} kind
  * @param {HostEvidence} e
- * @returns {{ verdict: string, nextStep: string }}
+ * @returns {Verdict}
  */
 export function diagnose(kind, e) {
-  const unreachable = e.reachability.nodeUp === false;
-  if (unreachable) {
+  if (e.reachability.nodeUp === false) {
+    const lastSeen = e.reachability.nodeLastSeen ? ` since ${clock(e.reachability.nodeLastSeen)}` : '';
+    const exporter = e.reachability.exporterUp === false ? ' The Phoenix health exporter is down too.' : '';
     return {
-      verdict: `*${e.host} is unreachable:* its host metrics stopped${
-        e.reachability.nodeLastSeen ? ` (last seen ${clock(e.reachability.nodeLastSeen)})` : ''
-      }${e.reachability.exporterUp === false ? ' and the Phoenix health exporter is down too' : ''}. This is the whole machine or its network, not a single service.`,
-      nextStep: 'Check the server in the Hetzner console (power, network, disk full) before looking at Phoenix itself.',
+      status: 'down',
+      title: 'Server unreachable',
+      detail: `No host metrics from ${e.host}${lastSeen}.${exporter} The whole machine or its network is down, not a single service.`,
+      nextStep: 'Check the server in the Hetzner console (power, network, disk full) before looking at Phoenix.',
     };
   }
 
   if (kind === 'machine' && e.reachability.nodeUp) {
     return {
-      verdict: `*Heartbeat missing, machine fine:* host metrics from ${e.host} keep arriving, so the server is up; only the heartbeat signal stopped.`,
-      nextStep: 'Check the heartbeat agent on the server; nothing else needs attention.',
+      status: 'watch',
+      title: 'Heartbeat missing, server is up',
+      detail: `Host metrics from ${e.host} keep arriving; only the heartbeat signal stopped.`,
+      nextStep: 'Check the heartbeat agent on the server. Nothing else needs attention.',
     };
   }
 
   if (kind === 'load' && e.load1 && e.cpus && e.cpu) {
-    const ratio = e.load1.max / e.cpus;
+    const load = `Load ${e.load1.max.toFixed(1)} on ${e.cpus} CPUs (${Math.round((e.load1.max / e.cpus) * 100)}%)`;
     const busy = 1 - e.cpu.idle;
     if (e.cpu.steal > 0.2) {
       return {
-        verdict: `*Hetzner host contention:* ${pct(e.cpu.steal)} of CPU time was stolen by the hypervisor while load reached ${e.load1.max.toFixed(1)} on ${e.cpus} CPUs.`,
-        nextStep: 'Nothing on this server to fix; if it repeats, move it to a dedicated-vCPU plan.',
+        status: 'watch',
+        title: 'Hetzner host contention',
+        detail: `${load}, with ${pct(e.cpu.steal)} of CPU time taken by the hypervisor.`,
+        nextStep: 'Nothing to fix on this server. If it repeats, move it to a dedicated-vCPU plan.',
       };
     }
     if (e.cpu.iowait > 0.2 || (e.diskBusyPctMax ?? 0) > 80) {
       return {
-        verdict: `*Disk-bound:* load reached ${e.load1.max.toFixed(1)} on ${e.cpus} CPUs while the CPU waited on disk ${pct(e.cpu.iowait)} of the time (disk busy up to ${Math.round(e.diskBusyPctMax ?? 0)}%).`,
-        nextStep: 'Look for heavy disk work at that time: backups, database vacuum/dumps, log bursts.',
+        status: 'action',
+        title: 'Waiting on disk',
+        detail: `${load}; the CPU waited on disk ${pct(e.cpu.iowait)} of the time (disk busy up to ${Math.round(e.diskBusyPctMax ?? 0)}%).`,
+        nextStep: 'Look for heavy disk work at that time: backups, database dumps or vacuum, log bursts.',
       };
     }
     if (busy < 0.5) {
       const waitingOn = e.logs?.topErrors.find((t) => WAIT_CAUSE_RE.test(t.pattern));
+      const cause = waitingOn ? WAIT_CAUSE_RE.exec(waitingOn.pattern)?.[0].toLowerCase() : null;
       return {
-        verdict: `*Not real CPU pressure:* load reached ${e.load1.max.toFixed(1)} on ${e.cpus} CPUs (${Math.round(ratio * 100)}%), but the CPU was ${pct(e.cpu.idle)} idle, with no disk wait and no steal. The load average was inflated by tasks waiting without using CPU or disk${
+        status: 'false-alarm',
+        title: 'Not real CPU pressure',
+        detail: `${load}, but the CPU was ${pct(e.cpu.idle)} idle. Tasks were waiting, not computing${
           waitingOn
-            ? `, and at the same time ${waitingOn.service} logged ${waitingOn.count} errors about ${WAIT_CAUSE_RE.exec(waitingOn.pattern)?.[0].toLowerCase()}, the likely thing they were waiting for`
+            ? `; ${waitingOn.service} logged ${waitingOn.count}× "${cause}" at the same time, the likely reason`
             : ''
         }.`,
         nextStep: waitingOn
-          ? 'Fix the waiting cause in the errors below; separately, alerting on CPU utilisation instead of load average would stop this kind of false alarm.'
-          : 'The rule measures load average, which over-counts waiting tasks. Alerting on CPU utilisation instead would remove this false alarm.',
+          ? `Look into the "${cause}" errors below. The rule itself would be quieter if it measured CPU use instead of load average.`
+          : 'Change the rule to measure CPU use instead of load average; that removes this false alarm.',
       };
     }
     return {
-      verdict: `*Real CPU saturation:* the CPU was ${pct(busy)} busy (user ${pct(e.cpu.user)}, system ${pct(e.cpu.system)}) and load reached ${e.load1.max.toFixed(1)} on ${e.cpus} CPUs.`,
+      status: 'action',
+      title: 'CPU saturated',
+      detail: `${load}; the CPU was ${pct(busy)} busy (user ${pct(e.cpu.user)}, system ${pct(e.cpu.system)}).`,
       nextStep: e.logs?.byService
-        ? `Check what ${topService(e.logs.byService)} was doing at ${clock(e.load1.at)}; if this repeats, the server needs more CPUs.`
-        : 'Find the busy process on the server; if this repeats, the server needs more CPUs.',
+        ? `Check what ${topService(e.logs.byService)} was doing at ${clock(e.load1.at)}. If it repeats, the server needs more CPUs.`
+        : 'Find the busy process on the server. If it repeats, the server needs more CPUs.',
     };
   }
 
   if (kind === 'memory' && e.memUsedPctMax !== null) {
     const swapGrew = e.swap && e.swap.endMb - e.swap.startMb > 100;
     return {
-      verdict: `*Memory pressure:* up to ${Math.round(e.memUsedPctMax)}% used${
+      status: swapGrew ? 'action' : 'watch',
+      title: swapGrew ? 'Running out of memory' : 'Memory peak',
+      detail: `Up to ${Math.round(e.memUsedPctMax)}% memory used${
         e.swap ? `, swap ${Math.round(e.swap.startMb)} → ${Math.round(e.swap.endMb)} MB` : ''
-      }.${swapGrew ? ' Swap is growing, so the server is short of memory, not just caching.' : ''}`,
+      }.${swapGrew ? ' Swap is growing, so this is a real shortage, not caching.' : ''}`,
       nextStep: swapGrew
-        ? 'Restart or limit the service using the most memory; if it repeats, give the server more RAM.'
-        : 'Watch whether usage drops on its own; a one-off peak usually comes from a large import or report.',
+        ? 'Restart or limit the service using the most memory. If it repeats, add RAM.'
+        : 'Check whether it drops on its own; one-off peaks usually come from a large import or report.',
     };
   }
 
   if (kind === 'disk' && e.filesystems.length) {
     const worst = [...e.filesystems].sort((a, b) => b.usedPct - a.usedPct)[0];
-    const eta =
-      worst.daysToFull !== null
-        ? `, full in about ${Math.max(1, Math.round(worst.daysToFull))} days at the current rate`
+    const soon = worst.daysToFull !== null && worst.daysToFull < 7;
+    const growth =
+      worst.growthGbPerDay !== null
+        ? `, ${worst.growthGbPerDay >= 0 ? '+' : ''}${worst.growthGbPerDay.toFixed(1)} GB in 24 h`
         : '';
+    const eta = worst.daysToFull !== null ? ` Full in about ${Math.max(1, Math.round(worst.daysToFull))} days.` : '';
     return {
-      verdict: `*Disk filling up:* \`${worst.mount}\` is ${Math.round(worst.usedPct)}% used${
-        worst.growthGbPerDay !== null
-          ? ` (${worst.growthGbPerDay >= 0 ? '+' : ''}${worst.growthGbPerDay.toFixed(1)} GB in 24 h)`
-          : ''
-      }${eta}.`,
-      nextStep: 'Clean up old Docker images/volumes, logs and backups, or enlarge the volume.',
+      status: soon ? 'action' : 'watch',
+      title: 'Disk filling up',
+      detail: `\`${worst.mount}\` is ${Math.round(worst.usedPct)}% used${growth}.${eta}`,
+      nextStep: 'Clean up old Docker images and volumes, logs and backups, or enlarge the volume.',
     };
   }
 
-  if (kind === 'exporter') {
-    if (e.reachability.nodeUp && e.reachability.exporterUp === false) {
-      return {
-        verdict: `*Health exporter stuck, machine fine:* host metrics from ${e.host} still arrive, but the Phoenix health exporter stopped answering.`,
-        nextStep: 'Restart the health-exporter container on the server; Phoenix itself may be fine.',
-      };
-    }
+  if (kind === 'exporter' && e.reachability.nodeUp && e.reachability.exporterUp === false) {
+    return {
+      status: 'watch',
+      title: 'Health exporter stuck, server is up',
+      detail: `Host metrics from ${e.host} still arrive, but the Phoenix health exporter stopped answering.`,
+      nextStep: 'Restart the health-exporter container. Phoenix itself may be fine.',
+    };
   }
 
-  const down = e.healthChecks.filter((c) => c.minInWindow === 0);
   if ((kind === 'health' || kind === 'exporter') && e.healthChecks.length) {
+    const down = e.healthChecks.filter((c) => c.minInWindow === 0);
     if (down.length) {
       const stillDown = down.filter((c) => c.now === 0);
+      const names = down.map((c) => `\`${c.check}\``).join(', ');
       return {
-        verdict: `*Phoenix checks failing on ${e.host}:* ${down.map((c) => `\`${c.check}\``).join(', ')} went down${
+        status: stillDown.length ? 'action' : 'watch',
+        title: stillDown.length ? 'Phoenix checks failing' : 'Phoenix checks recovered',
+        detail: `${names} went down${
           stillDown.length
-            ? `, ${stillDown.length === down.length ? 'all still down' : `${stillDown.map((c) => c.check).join(', ')} still down`}`
-            : ', all recovered now'
-        }. Host metrics are ${e.reachability.nodeUp ? 'normal' : 'missing'}.`,
+            ? stillDown.length === down.length
+              ? ' and are still down'
+              : `; still down: ${stillDown.map((c) => `\`${c.check}\``).join(', ')}`
+            : ' and recovered'
+        }. The server itself is up.`,
         nextStep: e.logs?.topErrors.length
           ? 'Start from the most frequent error below.'
-          : 'Check the failing service’s container on the server.',
+          : "Check the failing service's container on the server.",
       };
     }
     return {
-      verdict: `*All Phoenix checks on ${e.host} report healthy right now*; the failure was too short to show in the sampled data.`,
-      nextStep: 'If it keeps flapping, look at the error lines below around the alert time.',
+      status: 'watch',
+      title: 'Short blip',
+      detail: `All Phoenix checks on ${e.host} are healthy; the failure was too short to show in the sampled data.`,
+      nextStep: 'If it keeps flapping, look at the errors below around the alert time.',
     };
   }
 
   return {
-    verdict: `Collected the host data for ${e.host} around the alert; nothing stands out as the cause.`,
+    status: 'watch',
+    title: 'No clear cause',
+    detail: `Nothing in ${e.host}'s metrics or logs stands out around the alert.`,
     nextStep: 'Open the alert rule in Grafana for the exact condition.',
   };
 }
