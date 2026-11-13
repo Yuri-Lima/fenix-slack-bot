@@ -9,6 +9,7 @@ const { config } = await import('../../config.js');
 const { startMcpServer } = await import('../../mcp/server.js');
 const { clientForToken, createClient, listClients, revokeClient } = await import('../../mcp/clients.js');
 const { handleMcpSendDecision } = await import('../../listeners/actions/mcp-send-approval.js');
+const { flushUsage, monthKey, readMonth } = await import('../../utils/usage-store.js');
 const { DISCARD_ACTION, SEND_ACTION } = await import('../../listeners/views/mcp-send-approval-builder.js');
 
 const OWNER = 'U0OWNER';
@@ -178,6 +179,19 @@ describe('MCP endpoint with named clients', () => {
     assert.match(/** @type {any} */ (r.content)[0].text, /^Sent to me\./);
     assert.strictEqual(slack.chat.postMessage.mock.calls.at(-1).arguments[0].text, 'Direct');
     await client.close();
+  });
+
+  it('records each owner decision in the usage log, under the client and the owner', async () => {
+    await flushUsage();
+    const decisions = readMonth(monthKey(new Date())).filter((r) => r.subject?.startsWith('slack_send_message '));
+    const sent = decisions.findLast((r) => r.subject === 'slack_send_message sent');
+    const discarded = decisions.findLast((r) => r.subject === 'slack_send_message discarded');
+    assert.deepStrictEqual(
+      [sent?.kind, sent?.userName, sent?.userId, sent?.outcome],
+      ['mcp', 'srv-drafter', OWNER, 'ok'],
+    );
+    assert.strictEqual(discarded?.userName, 'srv-drafter');
+    assert.deepStrictEqual(sent?.tools, {}, 'the decision does not count as a second tool call');
   });
 
   it('rejects revoked tokens on the next request', async () => {
