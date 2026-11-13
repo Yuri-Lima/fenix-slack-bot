@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Manage the Fenix systemd service on a VPS over SSH.
-# Usage: scripts/vps.sh <status|restart|stop|logs|logs:follow|deploy>
+# Usage: scripts/vps.sh <status|restart|stop|logs|logs:follow|deploy|mcp-client ...>
 # Connection details come from .env.deploy (see .env.deploy.sample).
 set -euo pipefail
 
@@ -31,6 +31,12 @@ case "${1:-}" in
   stop) remote "systemctl stop $SERVICE && echo stopped" ;;
   logs) remote "journalctl -u $SERVICE --no-pager -n 50" ;;
   logs:follow) remote "journalctl -u $SERVICE -f" ;;
+  mcp-client)
+    # Runs as the service user so data/mcp-clients.json keeps its owner. The token from
+    # `create` goes to stdout only: npm run -s vps:mcp-client -- create grok > ~/.fenix_mcp_token_grok
+    shift
+    remote "cd $VPS_PATH && sudo -u $SERVICE_USER node scripts/mcp-client.js $(printf '%q ' "$@")"
+    ;;
   deploy)
     rsync -avz \
       --exclude='.env' --exclude='.env.deploy' --exclude='node_modules/' --exclude='.git/' \
@@ -40,7 +46,7 @@ case "${1:-}" in
     remote "cd $VPS_PATH && npm ci --omit=dev && chown -R $SERVICE_USER:$SERVICE_USER $VPS_PATH && systemctl restart $SERVICE && sleep 2 && systemctl status $SERVICE"
     ;;
   *)
-    echo "Usage: $0 <status|restart|stop|logs|logs:follow|deploy>" >&2
+    echo "Usage: $0 <status|restart|stop|logs|logs:follow|deploy|mcp-client ...>" >&2
     exit 1
     ;;
 esac

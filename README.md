@@ -244,10 +244,10 @@ the Fenix server.
     "did you mean" suggestions, and invite hints name the exact bot user.
   - `slack_users` (read-only, every connection): the people Fenix can message, with handle, user ID, title,
     active/away, custom status (vacation, sick, focus...) and when it clears, huddles, and local time.
-  - `slack_send_message` (owner only: the static-token connection): posts as Fenix to `me` (a DM to the owner),
+  - `slack_send_message` (connections with the `send` scope; see *Other MCP clients*): posts as Fenix to `me` (a DM to the owner),
     `#channel`, `@person`, a Slack ID, or a thread given by its message link, and returns the message link. For a DM
-    it also notes the recipient's status. It is not marked read-only, so Claude Code asks before each send; OAuth
-    sign-ins from Claude app connectors never get it.
+    it also notes the recipient's status. It is not marked read-only, so Claude Code asks before each send; clients
+    registered with Slack approval only draft, and OAuth sign-ins from Claude app connectors never get it.
   Ask a session, for example: *"Write a short Slack message about today's failed builds and DM it to me."*
 - **One definition per tool:** the endpoint registers the same tool objects the Slack agent uses.
 - **Authenticated:** requests need `Authorization: Bearer <FENIX_MCP_TOKEN>` (constant-time check); anything else
@@ -278,6 +278,48 @@ claude mcp add --transport http fenix https://<your-fenix-domain>/mcp --header "
 
 In the Claude app: *Settings → Connectors → Add custom connector*, enter `https://<your-fenix-domain>/mcp`, and approve
 the request Fenix sends you in Slack.
+
+### Other MCP clients (Cursor, Grok, ...)
+
+The tools hold no model logic, so any MCP client that speaks Streamable HTTP with a bearer token can use them. Give
+each client its own token, so it shows up by name in the logs and the usage report and can be revoked on its own:
+
+| Connection | Tools | Sending as Fenix |
+|---|---|---|
+| `FENIX_MCP_TOKEN` (Claude Code) | all | direct; Claude Code asks before each tool call |
+| Registered client, default | read-only | none |
+| Registered client, `--send` | all | each message waits for an owner's **Send** click in Slack |
+| Registered client, `--send --no-approval` | all | direct; only for clients that ask before each call |
+| Claude app connector (OAuth) | read-only | none |
+
+```sh
+# Create a client on the server; only the token goes to stdout, straight into a file
+npm run -s vps:mcp-client -- create grok --send > ~/.fenix_mcp_token_grok && chmod 600 ~/.fenix_mcp_token_grok
+npm run -s vps:mcp-client -- list
+npm run -s vps:mcp-client -- revoke grok      # creating the same name again rotates its token
+```
+
+Clients with Slack approval get the draft in each owner's DM with **Send / Discard** buttons; the tool call returns
+straight away and says so. Drafts expire after 30 minutes and live in memory only.
+
+**Grok CLI** (`~/.grok/config.toml`; Grok reads the token file on every request):
+
+```toml
+[mcp_servers.fenix]
+url = "https://<your-fenix-domain>/mcp"
+bearer_token_file = "~/.fenix_mcp_token_grok"
+enabled = true
+```
+
+**Cursor** (`~/.cursor/mcp.json`, under `mcpServers`):
+
+```json
+"fenix": {
+  "type": "streamableHttp",
+  "url": "https://<your-fenix-domain>/mcp",
+  "headers": { "Authorization": "Bearer <cursor token>" }
+}
+```
 
 ## Architecture
 

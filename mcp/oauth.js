@@ -516,6 +516,18 @@ export function isValidAccessToken(token) {
 }
 
 /**
+ * Name of the app a valid OAuth access token was issued to, or null.
+ * @param {string} token
+ * @returns {string | null}
+ */
+export function accessTokenClientName(token) {
+  load();
+  const entry = store.accessTokens[sha256(token)];
+  if (!entry || entry.expiresAt <= nowSec()) return null;
+  return store.clients[entry.clientId]?.name || entry.clientId;
+}
+
+/**
  * Revoke every OAuth token (connectors must sign in again). Static token users are unaffected.
  * @returns {number} tokens removed
  */

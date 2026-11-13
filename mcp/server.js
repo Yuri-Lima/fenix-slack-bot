@@ -8,15 +8,17 @@ import { buildApprovalBlocks } from '../listeners/views/mcp-oauth-approval-build
 import packageJson from '../package.json' with { type: 'json' };
 import { createTokenReader } from '../utils/tokens.js';
 import { recordUsage, ruleBasedRun } from '../utils/usage-store.js';
+import { clientForToken, STATIC_CLIENT_NAME } from './clients.js';
 import {
+  accessTokenClientName,
   authorizationOutcome,
   authorizationServerMetadata,
   exchangeToken,
-  isValidAccessToken,
   protectedResourceMetadata,
   registerClient,
   startAuthorization,
 } from './oauth.js';
+import { requestSendApproval } from './send-approval.js';
 
 // MCP server for Claude Code: Fenix's read-only tools over Streamable HTTP, plus
 // owner-only tools (slack_send_message) for the static-token connection.
@@ -71,12 +73,39 @@ export function isAuthorized(header, token) {
 }
 
 /**
+ * Who a request comes from, by its bearer token: the static FENIX_MCP_TOKEN (Claude Code, which asks
+ * before each tool call, so it sends without approval), a registered client (scripts/mcp-client.js),
+ * or a Claude app connector signed in with OAuth (read-only).
+ * @param {string} header - Authorization header
+ * @param {string} staticToken
+ * @param {boolean} oauth - whether OAuth sign-in is on
+ * @returns {import('./clients.js').McpCaller | null}
+ */
+export function identifyCaller(header, staticToken, oauth) {
+  if (isAuthorized(header, staticToken))
+    return { name: STATIC_CLIENT_NAME, scopes: ['read', 'send'], sendApproval: 'none' };
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!bearer) return null;
+  const registered = clientForToken(bearer);
+  if (registered) return registered;
+  const app = oauth ? accessTokenClientName(bearer) : null;
+  if (!app) return null;
+  const slug =
+    app
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') || 'connector';
+  return { name: `app-${slug}`, scopes: ['read'], sendApproval: 'slack' };
+}
+
+/**
  * An MCP server exposing the read-only tools (plus `readOnly` extras such as slack_users), and
- * `owner` tools (which change things) when the caller is the owner. Each call is recorded in the usage log.
- * @param {{ readOnly?: any[], owner?: any[] }} [extra] - from createSlackMcpTools(); `owner` only for the static-token connection
+ * `owner` tools (which change things) for callers allowed to use them. Each call is recorded in
+ * the usage log under the caller's name.
+ * @param {{ readOnly?: any[], owner?: any[], caller?: import('./clients.js').McpCaller }} [options]
  * @returns {McpServer}
  */
-export function buildMcpServer({ readOnly = [], owner: ownerTools = [] } = {}) {
+export function buildMcpServer({ readOnly = [], owner: ownerTools = [], caller } = {}) {
   const server = new McpServer(
     { name: 'fenix', version: packageJson.version },
     { instructions: ownerTools.length ? `${INSTRUCTIONS} ${OWNER_INSTRUCTIONS}` : INSTRUCTIONS },
@@ -103,6 +132,7 @@ export function buildMcpServer({ readOnly = [], owner: ownerTools = [] } = {}) {
           } finally {
             void recordUsage({
               ...ruleBasedRun('mcp', t.name, startedAt),
+              ...(caller ? { userName: caller.name } : {}),
               outcome: result && !result.isError ? 'ok' : 'error',
               tools: { [t.name]: 1 },
             });
@@ -213,7 +243,7 @@ export function startMcpServer(logger, slack) {
   const oauth = Boolean(publicUrl && slack && config.ownerIds.length);
   const challenge = oauth ? `Bearer resource_metadata="${publicUrl}/.well-known/oauth-protected-resource"` : 'Bearer';
   // Created once so their Slack directory caches outlive a single stateless request
-  const slackTools = slack ? createSlackMcpTools(slack) : { readOnly: [], owner: [] };
+  const slackTools = slack ? createSlackMcpTools(slack) : null;
 
   const http = createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost');
@@ -285,20 +315,25 @@ export function startMcpServer(logger, slack) {
         res.writeHead(404).end();
         return;
       }
-      const bearer = req.headers.authorization || '';
-      const accessToken = bearer.startsWith('Bearer ') ? bearer.slice(7) : '';
-      // Only the owner's static token gets tools that change things; OAuth sign-ins stay read-only
-      const isOwner = isAuthorized(bearer, token);
-      if (!isOwner && !(oauth && accessToken && isValidAccessToken(accessToken))) {
+      const caller = identifyCaller(req.headers.authorization || '', token, oauth);
+      if (!caller) {
         res.writeHead(401, { 'WWW-Authenticate': challenge }).end();
         return;
       }
+      detail = ` client=${caller.name}`;
       // Stateless server: no session to stream to (GET) or to end (DELETE)
       if (req.method !== 'POST') {
         res.writeHead(405, { Allow: 'POST' }).end();
         return;
       }
-      const server = buildMcpServer(isOwner ? slackTools : { readOnly: slackTools.readOnly });
+      // Sending needs the `send` scope; clients with sendApproval "slack" only draft, an owner sends
+      const approve =
+        caller.sendApproval === 'slack'
+          ? (/** @type {any} */ target, /** @type {string} */ text) =>
+              requestSendApproval(slack, caller.name, target, text)
+          : undefined;
+      const owner = slackTools && caller.scopes.includes('send') ? [slackTools.send(approve)] : [];
+      const server = buildMcpServer({ readOnly: slackTools?.readOnly, owner, caller });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => {
         void transport.close();

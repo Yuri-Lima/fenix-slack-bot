@@ -19,7 +19,8 @@
     "svc:restart": "systemctl restart fenix-bot && sleep 2 && systemctl status fenix-bot",
     "svc:stop": "systemctl stop fenix-bot && echo stopped",
     "svc:logs": "journalctl -u fenix-bot --no-pager -n 50",
-    "svc:logs:follow": "journalctl -u fenix-bot -f"
+    "svc:logs:follow": "journalctl -u fenix-bot -f",
+    "vps:mcp-client": "scripts/vps.sh mcp-client"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.296",

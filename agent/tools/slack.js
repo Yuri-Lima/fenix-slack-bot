@@ -353,51 +353,124 @@ export function describeStatus(member) {
 }
 
 /**
+ * Where a message goes, resolved from the tool arguments.
+ * @typedef {{ channel: string, threadTs?: string, where: string }} SendTarget
+ */
+
+/**
+ * Resolve slack_send_message arguments (`to`, `thread`) to a target, or explain what is wrong.
+ * @param {SlackDirectory} directory
+ * @param {{ to?: string, thread?: string }} args
+ * @returns {Promise<SendTarget | { error: string }>}
+ */
+export async function resolveSendTarget(directory, { to, thread }) {
+  const threadRef = thread ? parseThreadRef(thread) : null;
+  if (thread && !threadRef) return { error: `"${thread}" is not a Slack message link or ts.` };
+  if (!to && !threadRef?.channel) return { error: 'Say where to post: `to`, or a message link in `thread`.' };
+
+  // A thread link decides the conversation; `to` may only repeat it
+  let channel = threadRef?.channel;
+  if (to) {
+    const target = await resolveRecipient(directory, to);
+    if ('error' in target) return target;
+    if (channel && channel !== target.channel) {
+      return { error: `The thread link is in ${channel}, not ${to}. Leave \`to\` out to reply there.` };
+    }
+    channel = target.channel;
+  }
+  const where = `${to || channel}${threadRef ? ' (in thread)' : ''}`;
+  return { channel: /** @type {string} */ (channel), threadTs: threadRef?.ts, where };
+}
+
+/**
+ * Resolve `to`: 'me', a Slack ID, '@person' or '#channel' (a user ID posts to the DM with Fenix).
+ * @param {SlackDirectory} directory
+ * @param {string} to
+ * @returns {Promise<{ channel: string } | { error: string }>}
+ */
+async function resolveRecipient(directory, to) {
+  const value = to.trim();
+  if (value.toLowerCase() === 'me') {
+    return config.ownerIds[0] ? { channel: config.ownerIds[0] } : { error: 'No bot owner is configured for "me".' };
+  }
+  if (SLACK_ID.test(value)) return { channel: value };
+  if (value.startsWith('@')) {
+    const matches = await directory.findMembers(value.slice(1));
+    if (matches.length === 1) return { channel: matches[0].id };
+    if (matches.length > 1) {
+      return {
+        error: `"${value}" matches ${matches.map((m) => `${personName(m)} (${m.id})`).join(', ')}. Use the user ID.`,
+      };
+    }
+    return { error: `No workspace member is called "${value.slice(1)}". Use their Slack handle or user ID.` };
+  }
+  const found = await directory.channelByName(value);
+  if (found) return { channel: found.id };
+  const close = await directory.similarChannels(value);
+  const bot = await directory.bot();
+  return {
+    error:
+      `No channel called "${value}".${close.length ? ` Did you mean ${close.join(', ')}?` : ''} ${CHANNEL_RULES} ` +
+      `So unless the name is mistyped, "${value}" is a private channel: invite Fenix with ${inviteHint(bot)}.`,
+  };
+}
+
+/**
+ * Post a message to a resolved target as Fenix and describe the outcome (link, and the
+ * recipient's status for a DM). Used by the tool and by the Slack approval button.
+ * @param {import('@slack/web-api').WebClient} client
+ * @param {SlackDirectory} directory
+ * @param {SendTarget} target
+ * @param {string} text
+ * @returns {Promise<ReturnType<typeof textResult>>}
+ */
+export async function deliverMessage(client, directory, target, text) {
+  try {
+    const posted = await client.chat.postMessage({
+      channel: target.channel,
+      text,
+      thread_ts: target.threadTs,
+      unfurl_links: false,
+    });
+    const link = await client.chat
+      .getPermalink({ channel: /** @type {string} */ (posted.channel), message_ts: /** @type {string} */ (posted.ts) })
+      .then((r) => r.permalink)
+      .catch(() => null);
+    const bot = await directory.bot();
+    const as = bot ? ` as "${bot.name}" (@${bot.handle})` : '';
+    const sent = `Sent${as} to ${target.where}.${link ? ` ${link}` : ''}`;
+    // For a DM, say if the person has a status (vacation, sick, focus...) so the user knows
+    const person = /^[UW]/.test(target.channel)
+      ? (await directory.members().catch(() => [])).find((m) => m.id === target.channel)
+      : null;
+    const status = person ? describeStatus(person) : '';
+    return textResult(status ? `${sent}\nNote: ${personName(person)} has ${status}.` : sent);
+  } catch (e) {
+    const code = /** @type {any} */ (e).data?.error;
+    const bot = await directory.bot();
+    return textResult(code ? explainSlackError(code, target.where, bot) : `Could not send the message: ${e}`, true);
+  }
+}
+
+/**
  * Tool that posts a message as Fenix to a channel, a DM or a thread. It changes
  * something, so it is never in READ_ONLY_TOOLS: the MCP server offers it only to
- * the owner's static-token connection.
+ * connections allowed to send.
  * @param {import('@slack/web-api').WebClient} client
- * @param {SlackDirectory} [directory] - shared with slack_users; a private one by default
+ * @param {SlackDirectory} [directory] - shared with the other Slack tools; a private one by default
+ * @param {{ approve?: (target: SendTarget, text: string) => Promise<ReturnType<typeof textResult>> }} [options]
+ *   approve: instead of posting, hand the resolved draft to the owner for approval
  */
-export function createSlackSendMessageTool(client, directory = createSlackDirectory(client)) {
-  const { channelByName, similarChannels, findMembers } = directory;
-
-  /**
-   * Resolve where to post. Returns the Slack channel (a user ID posts to the DM with Fenix).
-   * @param {string} to
-   * @returns {Promise<{ channel: string } | { error: string }>}
-   */
-  async function resolveTarget(to) {
-    const value = to.trim();
-    if (value.toLowerCase() === 'me') {
-      return config.ownerIds[0] ? { channel: config.ownerIds[0] } : { error: 'No bot owner is configured for "me".' };
-    }
-    if (SLACK_ID.test(value)) return { channel: value };
-    if (value.startsWith('@')) {
-      const matches = await findMembers(value.slice(1));
-      if (matches.length === 1) return { channel: matches[0].id };
-      if (matches.length > 1) {
-        return {
-          error: `"${value}" matches ${matches.map((m) => `${personName(m)} (${m.id})`).join(', ')}. Use the user ID.`,
-        };
-      }
-      return { error: `No workspace member is called "${value.slice(1)}". Use their Slack handle or user ID.` };
-    }
-    const found = await channelByName(value);
-    if (found) return { channel: found.id };
-    const close = await similarChannels(value);
-    const bot = await directory.bot();
-    return {
-      error:
-        `No channel called "${value}".${close.length ? ` Did you mean ${close.join(', ')}?` : ''} ${CHANNEL_RULES} ` +
-        `So unless the name is mistyped, "${value}" is a private channel: invite Fenix with ${inviteHint(bot)}.`,
-    };
-  }
-
+export function createSlackSendMessageTool(client, directory = createSlackDirectory(client), { approve } = {}) {
   return tool(
     'slack_send_message',
     'Post a message as Fenix (the team bot) in Slack: to a channel, as a DM, or as a reply in a thread. ' +
-      'Write the finished message in Slack mrkdwn; it is sent exactly as given. Returns the message link.',
+      'Write the finished message in Slack mrkdwn; it is sent exactly as given. Returns the message link. ' +
+      'Before DMing someone, check slack_users for the right person and tell the user if they are away or on ' +
+      'vacation. If a channel is not found, check slack_channels for the exact name before suggesting an invite.' +
+      (approve
+        ? ' On this connection every message first goes to the owner in Slack, who must click Send before it is posted.'
+        : ''),
     {
       to: z
         .string()
@@ -421,51 +494,9 @@ export function createSlackSendMessageTool(client, directory = createSlackDirect
         ),
     },
     async ({ to, text, thread }) => {
-      const threadRef = thread ? parseThreadRef(thread) : null;
-      if (thread && !threadRef) return textResult(`"${thread}" is not a Slack message link or ts.`, true);
-      if (!to && !threadRef?.channel)
-        return textResult('Say where to post: `to`, or a message link in `thread`.', true);
-
-      // A thread link decides the conversation; `to` may only repeat it
-      let channel = threadRef?.channel;
-      if (to) {
-        const target = await resolveTarget(to);
-        if ('error' in target) return textResult(target.error, true);
-        if (channel && channel !== target.channel) {
-          return textResult(`The thread link is in ${channel}, not ${to}. Leave \`to\` out to reply there.`, true);
-        }
-        channel = target.channel;
-      }
-      const where = to || channel || '';
-
-      try {
-        const posted = await client.chat.postMessage({
-          channel: /** @type {string} */ (channel),
-          text,
-          thread_ts: threadRef?.ts,
-          unfurl_links: false,
-        });
-        const link = await client.chat
-          .getPermalink({
-            channel: /** @type {string} */ (posted.channel),
-            message_ts: /** @type {string} */ (posted.ts),
-          })
-          .then((r) => r.permalink)
-          .catch(() => null);
-        const bot = await directory.bot();
-        const as = bot ? ` as "${bot.name}" (@${bot.handle})` : '';
-        const sent = `Sent${as} to ${where}${threadRef ? ' (in thread)' : ''}.${link ? ` ${link}` : ''}`;
-        // For a DM, say if the person has a status (vacation, sick, focus...) so the user knows
-        const person = /^[UW]/.test(/** @type {string} */ (channel))
-          ? (await directory.members().catch(() => [])).find((m) => m.id === channel)
-          : null;
-        const status = person ? describeStatus(person) : '';
-        return textResult(status ? `${sent}\nNote: ${personName(person)} has ${status}.` : sent);
-      } catch (e) {
-        const code = /** @type {any} */ (e).data?.error;
-        const bot = await directory.bot();
-        return textResult(code ? explainSlackError(code, where, bot) : `Could not send the message: ${e}`, true);
-      }
+      const target = await resolveSendTarget(directory, { to, thread });
+      if ('error' in target) return textResult(target.error, true);
+      return approve ? approve(target, text) : deliverMessage(client, directory, target, text);
     },
   );
 }
