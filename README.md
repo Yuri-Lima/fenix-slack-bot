@@ -43,7 +43,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
 | 📝 | **"Create YouTrack Ticket" shortcut** | Message shortcut that turns any Slack message (and its surrounding context) into a pre-filled ticket. |
 | 📊 | **Usage tracking** | Every agent reply ends with its model, tokens, cost and steps, plus the month to date. Every run is logged to a monthly file, and `report` gives a full usage report computed in code (no AI tokens). |
-| 🔌 | **Claude Code connection (MCP)** | An authenticated MCP endpoint serves Fenix's read-only tools (TeamCity, flaky tests, server health, codebase, YouTrack search, usage) to Claude Code. All service tokens stay on the Fenix server. |
+| 🔌 | **Claude Code connection (MCP)** | An authenticated MCP endpoint serves Fenix's read-only tools (TeamCity, flaky tests, server health, codebase, YouTrack search, usage) to Claude Code, plus `slack_send_message` for the owner, so Claude can write a message and post it as Fenix. All service tokens stay on the Fenix server. |
 | 🧹 | **Thread cleanup** | `@Fenix delete` removes every message Fenix posted in a thread. |
 | 💬 | **Feedback loop** | 👍/👎 buttons on every answer plus conversational feedback capture, stored for the owner to review. |
 | 🛡️ | **Guardrails** | Owner allowlist, prompt-injection and credential-probing detection with strikes, a strict tool allowlist, and redaction rules. |
@@ -238,6 +238,11 @@ the Fenix server.
 
 - **Read-only by design:** `READ_ONLY_TOOLS` in `agent/tools/index.js` lists what is exposed (18 tools). YouTrack
   create/update and Slack-bound tools are excluded, and every tool is marked `readOnlyHint`.
+- **One owner tool:** the static-token connection (Claude Code) also gets `slack_send_message`, from
+  `createOwnerMcpTools()`. It posts as Fenix to `me` (a DM to the owner), `#channel`, `@person`, a Slack ID, or a
+  thread given by its message link, and returns the message link. It is not marked read-only, so Claude Code asks
+  before each send. OAuth sign-ins from Claude app connectors never get it.
+  Ask a session, for example: *"Write a short Slack message about today's failed builds and DM it to me."*
 - **One definition per tool:** the endpoint registers the same tool objects the Slack agent uses.
 - **Authenticated:** requests need `Authorization: Bearer <FENIX_MCP_TOKEN>` (constant-time check); anything else
   gets `401`. The server is stateless (a fresh MCP server per POST) and refuses to start without a token.
@@ -442,11 +447,11 @@ WantedBy=multi-user.target
 .
 ├── app.js                       # Bolt app (Socket Mode) entry point
 ├── config.js                    # Loads fenix.config.json
-├── mcp/                         # MCP endpoint for Claude Code (read-only tools)
+├── mcp/                         # MCP endpoint for Claude Code (read-only tools + owner send)
 ├── integrations/                # TeamCity, YouTrack, GitLab API clients and TeamCity test history
 ├── agent/
 │   ├── fenix.js                 # Agent runner, system prompt, Slack-bound tools
-│   └── tools/                   # TeamCity, flaky tracker, YouTrack, and GitLab tools
+│   └── tools/                   # TeamCity, flaky tracker, YouTrack, GitLab, Grafana, usage, Slack send
 ├── listeners/
 │   ├── events/                  # DMs, mentions, @Fenix delete, TeamCity failure analysis
 │   ├── actions/                 # Feedback and issue buttons

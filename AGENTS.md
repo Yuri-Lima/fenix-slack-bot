@@ -102,7 +102,7 @@ Every run is recorded through `utils/usage-store.js`: `runFenixAgent()` records 
 
 ### MCP Endpoint
 
-`mcp/server.js` serves `READ_ONLY_TOOLS` (from `agent/tools/index.js`) to Claude Code over Streamable HTTP, stateless, behind `FENIX_MCP_TOKEN`. It registers the same tool objects the agent uses; never re-implement a tool for MCP. Only add a tool to `READ_ONLY_TOOLS` if it cannot change anything. Claude app connectors sign in through the OAuth server in `mcp/oauth.js` (discovery, CIMD fetched only from `mcp.cimdOrigins`, DCR limited to `mcp.oauthRedirectUris`, port-agnostic loopback redirects, PKCE, rotating refresh tokens stored hashed); every sign-in needs an owner's Approve click in Slack (`listeners/actions/mcp-oauth-approval.js`). Never add a way to obtain tokens without that approval.
+`mcp/server.js` serves `READ_ONLY_TOOLS` (from `agent/tools/index.js`) to Claude Code over Streamable HTTP, stateless, behind `FENIX_MCP_TOKEN`. It registers the same tool objects the agent uses; never re-implement a tool for MCP. Only add a tool to `READ_ONLY_TOOLS` if it cannot change anything. Tools that change things (today only `slack_send_message`) come from `createOwnerMcpTools()` and are registered only for the owner's static-token connection, never for OAuth sign-ins. Claude app connectors sign in through the OAuth server in `mcp/oauth.js` (discovery, CIMD fetched only from `mcp.cimdOrigins`, DCR limited to `mcp.oauthRedirectUris`, port-agnostic loopback redirects, PKCE, rotating refresh tokens stored hashed); every sign-in needs an owner's Approve click in Slack (`listeners/actions/mcp-oauth-approval.js`). Never add a way to obtain tokens without that approval.
 
 ### Tool Definitions
 

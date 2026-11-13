@@ -22,8 +22,9 @@ describe('MCP OAuth sign-in with Slack approval', () => {
   const logLines = [];
   const slack = {
     chat: {
-      postMessage: mock.fn(async () => ({ ok: true })),
+      postMessage: mock.fn(async (/** @type {any} */ msg) => ({ ok: true, channel: msg.channel, ts: '1.000001' })),
       update: mock.fn(async () => ({ ok: true })),
+      getPermalink: mock.fn(async () => ({ permalink: 'https://acme.slack.com/archives/D1/p1000001' })),
     },
   };
 
@@ -188,7 +189,9 @@ describe('MCP OAuth sign-in with Slack approval', () => {
         requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}` } },
       }),
     );
-    assert.ok((await client.listTools()).tools.some((t) => t.name === 'host_health'));
+    const oauthTools = (await client.listTools()).tools.map((t) => t.name);
+    assert.ok(oauthTools.includes('host_health'));
+    assert.ok(!oauthTools.includes('slack_send_message'), 'app sign-ins never get tools that change things');
     await client.close();
 
     const refreshed = await (
@@ -235,14 +238,22 @@ describe('MCP OAuth sign-in with Slack approval', () => {
     for (const secret of [code, verifier, accessToken, 'state=']) assert.ok(!log.includes(secret));
   });
 
-  it('keeps accepting the static token used by Claude Code', async () => {
+  it('keeps accepting the static token used by Claude Code, which also gets slack_send_message', async () => {
     const client = new Client({ name: 'claude-code', version: '1.0.0' });
     await client.connect(
       new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
         requestInit: { headers: { Authorization: 'Bearer static-test-token' } },
       }),
     );
-    assert.ok((await client.listTools()).tools.length > 0);
+    const send = (await client.listTools()).tools.find((t) => t.name === 'slack_send_message');
+    assert.ok(send, 'the owner connection offers slack_send_message');
+    assert.strictEqual(send.annotations?.readOnlyHint, false);
+
+    const posted = slack.chat.postMessage.mock.callCount();
+    const r = await client.callTool({ name: 'slack_send_message', arguments: { to: 'me', text: 'hello from MCP' } });
+    assert.ok(!r.isError, JSON.stringify(r.content));
+    assert.deepStrictEqual(slack.chat.postMessage.mock.calls.at(-1).arguments[0].channel, 'U0OWNER');
+    assert.strictEqual(slack.chat.postMessage.mock.callCount(), posted + 1);
     await client.close();
   });
 });

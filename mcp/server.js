@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { READ_ONLY_TOOLS } from '../agent/tools/index.js';
+import { createOwnerMcpTools, READ_ONLY_TOOLS } from '../agent/tools/index.js';
 import { config } from '../config.js';
 import { buildApprovalBlocks } from '../listeners/views/mcp-oauth-approval-builder.js';
 import packageJson from '../package.json' with { type: 'json' };
@@ -18,7 +18,8 @@ import {
   startAuthorization,
 } from './oauth.js';
 
-// MCP server for Claude Code: Fenix's read-only tools over Streamable HTTP.
+// MCP server for Claude Code: Fenix's read-only tools over Streamable HTTP, plus
+// owner-only tools (slack_send_message) for the static-token connection.
 // Stateless (a fresh server per request), protected by a bearer token, and
 // every tool call is recorded in the usage log as kind 'mcp'. It reuses the
 // exact tool definitions the Slack agent uses, so there is one source per tool.
@@ -49,7 +50,10 @@ const oauthErrorDetail = (body) => (body?.error ? ` error=${logSafe(body.error)}
 const INSTRUCTIONS =
   'Fenix is the team DevOps assistant. Use these tools for CI builds and test failures (TeamCity), flaky tests, ' +
   'server health from Grafana metrics and logs, the GitLab codebase, YouTrack issues, and Fenix usage. ' +
-  'All tools are read-only.';
+  'All tools are read-only, except where noted.';
+const OWNER_INSTRUCTIONS =
+  'slack_send_message posts as Fenix to a channel, a DM or a thread. Use it when the user asks to send, post or DM ' +
+  'something in Slack; write the finished message in Slack mrkdwn first.';
 
 /**
  * Constant-time check of an Authorization header against the expected token.
@@ -64,15 +68,27 @@ export function isAuthorized(header, token) {
 }
 
 /**
- * An MCP server exposing the read-only tools, each call recorded in the usage log.
+ * An MCP server exposing the read-only tools, plus `ownerTools` (which change things)
+ * when the caller is the owner. Each call is recorded in the usage log.
+ * @param {any[]} [ownerTools] - from createOwnerMcpTools(); only for the static-token connection
  * @returns {McpServer}
  */
-export function buildMcpServer() {
-  const server = new McpServer({ name: 'fenix', version: packageJson.version }, { instructions: INSTRUCTIONS });
-  for (const t of READ_ONLY_TOOLS) {
+export function buildMcpServer(ownerTools = []) {
+  const server = new McpServer(
+    { name: 'fenix', version: packageJson.version },
+    { instructions: ownerTools.length ? `${INSTRUCTIONS} ${OWNER_INSTRUCTIONS}` : INSTRUCTIONS },
+  );
+  const tools = [
+    ...READ_ONLY_TOOLS.map((t) => ({ t, annotations: { readOnlyHint: true } })),
+    ...ownerTools.map((t) => ({
+      t,
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    })),
+  ];
+  for (const { t, annotations } of tools) {
     server.registerTool(
       t.name,
-      { description: t.description, inputSchema: t.inputSchema, annotations: { readOnlyHint: true } },
+      { description: t.description, inputSchema: t.inputSchema, annotations },
       /** @type {any} */ (
         async (/** @type {any} */ args, /** @type {any} */ extra) => {
           const startedAt = Date.now();
@@ -193,6 +209,8 @@ export function startMcpServer(logger, slack) {
   }
   const oauth = Boolean(publicUrl && slack && config.ownerIds.length);
   const challenge = oauth ? `Bearer resource_metadata="${publicUrl}/.well-known/oauth-protected-resource"` : 'Bearer';
+  // Created once so their Slack directory caches outlive a single stateless request
+  const ownerTools = slack ? createOwnerMcpTools(slack) : [];
 
   const http = createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost');
@@ -266,7 +284,9 @@ export function startMcpServer(logger, slack) {
       }
       const bearer = req.headers.authorization || '';
       const accessToken = bearer.startsWith('Bearer ') ? bearer.slice(7) : '';
-      if (!isAuthorized(bearer, token) && !(oauth && accessToken && isValidAccessToken(accessToken))) {
+      // Only the owner's static token gets tools that change things; OAuth sign-ins stay read-only
+      const isOwner = isAuthorized(bearer, token);
+      if (!isOwner && !(oauth && accessToken && isValidAccessToken(accessToken))) {
         res.writeHead(401, { 'WWW-Authenticate': challenge }).end();
         return;
       }
@@ -275,7 +295,7 @@ export function startMcpServer(logger, slack) {
         res.writeHead(405, { Allow: 'POST' }).end();
         return;
       }
-      const server = buildMcpServer();
+      const server = buildMcpServer(isOwner ? ownerTools : []);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => {
         void transport.close();

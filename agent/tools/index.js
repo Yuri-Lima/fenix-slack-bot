@@ -1,6 +1,7 @@
 import { flakyTestsTool, flakyTrendsTool, testTimelineTool } from './flaky-tracker.js';
 import { listFilesTool, readFileTool, recentCommitsTool, searchCodeTool } from './gitlab.js';
 import { hostHealthTool } from './grafana.js';
+import { createSlackSendMessageTool } from './slack.js';
 import {
   getBuildChangesTool,
   getBuildDetailsTool,
@@ -60,3 +61,10 @@ export const READ_ONLY_TOOLS = [
   testTimelineTool,
   usageReportTool,
 ];
+
+/**
+ * Tools that change something, served over MCP only to the owner's static-token
+ * connection (Claude Code), never to OAuth sign-ins from Claude app connectors.
+ * @param {import('@slack/web-api').WebClient} client
+ */
+export const createOwnerMcpTools = (client) => [createSlackSendMessageTool(client)];
