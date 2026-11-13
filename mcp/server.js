@@ -19,7 +19,7 @@ import {
   startAuthorization,
 } from './oauth.js';
 import { requestSendApproval } from './send-approval.js';
-import { MAX_UPLOAD_BYTES, storeUpload, takeUpload, UPLOAD_TTL_SEC } from './uploads.js';
+import { deleteUploadFile, storeUploadStream, takeUpload, UPLOAD_TTL_SEC } from './uploads.js';
 
 // MCP server for Claude Code: Fenix's read-only tools over Streamable HTTP, plus
 // owner-only tools (slack_send_message) for the static-token connection.
@@ -74,7 +74,7 @@ export function isAuthorized(header, token) {
 }
 
 /**
- * The shell command a connection runs to upload an image (bytes never pass through the model).
+ * The shell command a connection runs to upload an image or video (bytes never pass through the model).
  * Token files follow the setup convention: ~/.fenix_mcp_token for Claude Code, ~/.fenix_mcp_token_<client> otherwise.
  * @param {string} base - public origin of the endpoint
  * @param {string} clientName
@@ -83,8 +83,9 @@ export function isAuthorized(header, token) {
 export function uploadHint(base, clientName) {
   const tokenFile = clientName === STATIC_CLIENT_NAME ? '~/.fenix_mcp_token' : `~/.fenix_mcp_token_${clientName}`;
   return (
-    `curl -sS -X POST "${base}/uploads?filename=<name>.png" -H "Authorization: Bearer $(cat ${tokenFile})" ` +
-    '--data-binary @<path to image>   (PNG, JPEG, GIF or WebP up to 10 MB; replies {"upload_id": ...}, valid 1 hour)'
+    `curl -sS -T <path to file> "${base}/uploads?filename=<file name>" -H "Authorization: Bearer $(cat ${tokenFile})"` +
+    ` (PNG, JPEG, GIF, WebP, MP4, MOV or WebM up to ${config.mcp.maxUploadMb} MB; replies {"upload_id": ...}, ` +
+    'valid 1 hour)'
   );
 }
 
@@ -340,8 +341,9 @@ export function startMcpServer(logger, slack) {
         }
       }
 
-      // Images for slack_send_message: the client uploads the bytes here, then passes the upload_id
-      if (pathname === '/uploads' && req.method === 'POST') {
+      // Images and videos for slack_send_message: the client uploads the bytes here (POST, or PUT as
+      // `curl -T` sends), then passes the upload_id. The file streams to disk, never into memory.
+      if (pathname === '/uploads' && (req.method === 'POST' || req.method === 'PUT')) {
         const caller = identifyCaller(req.headers.authorization || '', token, oauth);
         if (!caller) {
           res.writeHead(401, { 'WWW-Authenticate': challenge }).end();
@@ -349,19 +351,10 @@ export function startMcpServer(logger, slack) {
         }
         detail = ` client=${caller.name}`;
         if (!caller.scopes.includes('send')) {
-          sendJson(res, 403, { error: 'This connection cannot send messages, so it cannot upload images.' });
+          sendJson(res, 403, { error: 'This connection cannot send messages, so it cannot upload files.' });
           return;
         }
-        /** @type {Buffer} */
-        let data;
-        try {
-          data = await readBytes(req, MAX_UPLOAD_BYTES);
-        } catch (e) {
-          if (!(e instanceof BodyTooLarge)) throw e;
-          sendJson(res, 413, { error: `Image too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB).` });
-          return;
-        }
-        const r = storeUpload(caller.name, data, url.searchParams.get('filename'));
+        const r = await storeUploadStream(caller.name, req, url.searchParams.get('filename'));
         if (!r.ok) {
           sendJson(res, r.status, { error: r.error });
           return;
@@ -369,7 +362,8 @@ export function startMcpServer(logger, slack) {
         sendJson(res, 201, {
           upload_id: r.upload.id,
           filename: r.upload.filename,
-          bytes: r.upload.data.length,
+          kind: r.upload.kind,
+          bytes: r.upload.size,
           expires_in: UPLOAD_TTL_SEC,
         });
         return;
@@ -397,9 +391,14 @@ export function startMcpServer(logger, slack) {
               slackTools.send({
                 approve:
                   caller.sendApproval === 'slack'
-                    ? (target, text, image) => requestSendApproval(slack, caller.name, target, text, image)
+                    ? (target, text, attachment) => requestSendApproval(slack, caller.name, target, text, attachment)
                     : undefined,
-                takeImage: (id) => takeUpload(id, caller.name),
+                takeAttachment: (id) => {
+                  const u = takeUpload(id, caller.name);
+                  if (!u) return null;
+                  const { path, size, filename, mimeType, kind } = u;
+                  return { path, size, filename, mimeType, kind, release: () => deleteUploadFile(path) };
+                },
                 uploadHint: uploadHint(uploadBase, caller.name),
               }),
             ]

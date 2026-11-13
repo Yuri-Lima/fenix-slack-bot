@@ -61,3 +61,11 @@ export function money(usd) {
   if (usd > 0 && usd < 0.01) return '<$0.01';
   return `$${usd.toFixed(2)}`;
 }
+
+/**
+ * A byte count for people: "24.0 MB", "380 KB".
+ * @param {number} bytes
+ * @returns {string}
+ */
+export const formatBytes = (bytes) =>
+  bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;

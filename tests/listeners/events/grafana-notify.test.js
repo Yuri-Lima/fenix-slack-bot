@@ -1,7 +1,12 @@
 import assert from 'node:assert';
-import { describe, it } from 'node:test';
+import { describe, it, mock } from 'node:test';
 
-import { formatGrafanaAnalysis, parseGrafanaAlert, targetHost } from '../../../listeners/events/grafana-notify.js';
+import {
+  formatGrafanaAnalysis,
+  handleGrafanaNotify,
+  parseGrafanaAlert,
+  targetHost,
+} from '../../../listeners/events/grafana-notify.js';
 
 // Synthetic messages with the exact structure the Grafana Slack app posts.
 const G = 'https://grafana.example.com';
@@ -176,5 +181,39 @@ describe('formatGrafanaAnalysis', () => {
       ],
     });
     assert.strictEqual(formatGrafanaAnalysis(onlyResolved, [], new Map()), null);
+  });
+});
+
+describe('handleGrafanaNotify with excluded hosts (grafana.ignoreHosts: ["test"])', () => {
+  const alertFor = (hosts) => ({
+    bot_id: 'B0GRAFANA',
+    channel: 'C0ALERTS',
+    ts: '1794500000.000100',
+    attachments: [
+      {
+        title: `:rotating_light: High Memory Usage — ${hosts.length} firing, 0 resolved`,
+        text: [`*Firing (${hosts.length})*`, ...hosts.map((h) => `&gt; \`${h}\` · since 08:25`)].join('\n'),
+      },
+    ],
+  });
+  const slackClient = () => ({
+    chat: { postMessage: mock.fn(async () => ({ ok: true })) },
+    conversations: { history: mock.fn(async () => ({ messages: [] })) },
+  });
+  const logger = { warn: () => {}, error: () => {}, info: () => {} };
+
+  it('does not reply when every firing host is a test server', async () => {
+    const client = slackClient();
+    await handleGrafanaNotify(/** @type {any} */ ({ client, event: alertFor(['shop-TEST-01']), logger }));
+    assert.strictEqual(client.chat.postMessage.mock.callCount(), 0);
+  });
+
+  it('analyses the other hosts and leaves the test server out of the reply', async () => {
+    const client = slackClient();
+    await handleGrafanaNotify(/** @type {any} */ ({ client, event: alertFor(['alpha', 'alpha-test']), logger }));
+    assert.strictEqual(client.chat.postMessage.mock.callCount(), 1);
+    const reply = JSON.stringify(client.chat.postMessage.mock.calls[0].arguments[0]);
+    assert.match(reply, /alpha/);
+    assert.ok(!reply.includes('alpha-test'), reply);
   });
 });

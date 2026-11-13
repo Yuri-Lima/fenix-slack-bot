@@ -25,9 +25,15 @@ export async function handleMcpSendDecision({ ack, body, client, logger }) {
   let result = '';
   if (draft && action.action_id === SEND_ACTION) {
     directory ??= createSlackDirectory(client);
-    const posted = await deliverMessage(client, directory, draft.target, draft.text, draft.image);
-    outcome = posted.isError ? 'failed' : 'sent';
-    result = posted.content[0].text;
+    try {
+      const posted = await deliverMessage(client, directory, draft.target, draft.text, draft.attachment);
+      outcome = posted.isError ? 'failed' : 'sent';
+      result = posted.content[0].text;
+    } finally {
+      draft.attachment?.release();
+    }
+  } else {
+    draft?.attachment?.release();
   }
   if (draft) {
     // The client's tool call was logged when it drafted; this records the owner's decision

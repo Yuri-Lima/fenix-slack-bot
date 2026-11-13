@@ -13,7 +13,11 @@ const { flushUsage, monthKey, readMonth } = await import('../../utils/usage-stor
 const { DISCARD_ACTION, SEND_ACTION } = await import('../../listeners/views/mcp-send-approval-builder.js');
 
 const OWNER = 'U0OWNER';
-const { PNG } = await import('../fixtures/png.js');
+const { MP4, PNG } = await import('../fixtures/media.js');
+const { createServer } = await import('node:http');
+const { existsSync, readdirSync } = await import('node:fs');
+const { join } = await import('node:path');
+const { resolvePath } = await import('../../config.js');
 
 describe('MCP client registry', () => {
   after(() => {
@@ -61,12 +65,37 @@ describe('MCP endpoint with named clients', () => {
     },
     conversations: { open: mock.fn(async ({ users }) => ({ channel: { id: `D-${users}` } })) },
     files: {
-      uploadV2: mock.fn(async () => ({
+      // Slack's external upload: an upload URL (served by `receiver` below), then completion into a conversation
+      getUploadURLExternal: mock.fn(async (/** @type {any} */ a) => ({
         ok: true,
-        files: [{ files: [{ id: 'F1', permalink: 'https://acme.slack.com/files/U0BOT/F1/banner.png' }] }],
+        upload_url: `${receiverUrl}/upload/${a.filename}`,
+        file_id: `F-${a.filename}`,
+      })),
+      completeUploadExternal: mock.fn(async (/** @type {any} */ a) => ({
+        ok: true,
+        files: [{ id: a.files[0].id, permalink: `https://acme.slack.com/files/U0BOT/${a.files[0].id}` }],
       })),
     },
   };
+  /** Bytes Slack's upload URL received, per file name. */
+  /** @type {Record<string, { bytes: number, type: string | undefined, length: string | undefined }>} */
+  const received = {};
+  let receiverUrl = '';
+  const receiver = createServer((req, res) => {
+    let bytes = 0;
+    req.on('data', (c) => {
+      bytes += c.length;
+    });
+    req.on('end', () => {
+      received[decodeURIComponent(req.url?.split('/').pop() || '')] = {
+        bytes,
+        type: req.headers['content-type'],
+        length: req.headers['content-length'],
+      };
+      res.end('OK');
+    });
+  });
+  const uploadDir = join(resolvePath(config.dataDir), 'uploads');
   /** @type {Record<string, string>} */
   const tokens = {};
 
@@ -75,6 +104,9 @@ describe('MCP endpoint with named clients', () => {
     tokens.drafter = createClient('srv-drafter', { send: true }).token;
     tokens.sender = createClient('srv-sender', { send: true, sendApproval: 'none' }).token;
     config.mcp = { ...config.mcp, enabled: true, host: '127.0.0.1', port: 0 };
+    receiver.listen(0, '127.0.0.1');
+    await new Promise((resolve) => receiver.once('listening', resolve));
+    receiverUrl = `http://127.0.0.1:${/** @type {any} */ (receiver.address()).port}`;
     http = startMcpServer({ info: (m) => logLines.push(m), error: () => {} }, slack);
     await new Promise((resolve) => http.once('listening', resolve));
     base = `http://127.0.0.1:${http.address().port}`;
@@ -83,6 +115,7 @@ describe('MCP endpoint with named clients', () => {
   after(async () => {
     for (const name of ['srv-reader', 'srv-drafter', 'srv-sender']) revokeClient(name);
     await new Promise((resolve) => http.close(resolve));
+    await new Promise((resolve) => receiver.close(resolve));
   });
 
   /** @param {string} token */
@@ -202,77 +235,119 @@ describe('MCP endpoint with named clients', () => {
     assert.deepStrictEqual(sent?.tools, {}, 'the decision does not count as a second tool call');
   });
 
-  /** Upload bytes as a client; returns the parsed reply and status. */
+  /** Upload bytes as a client (PUT, as `curl -T` does); returns the parsed reply and status. */
   const upload = async (/** @type {string} */ token, /** @type {Buffer} */ body, filename = 'banner.png') => {
     const r = await fetch(`${base}/uploads?filename=${filename}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}` },
       body,
     });
     return { status: r.status, body: await r.json() };
   };
 
-  it('accepts image uploads only from connections that can send, and only real images', async () => {
-    const ok = await upload(tokens.sender, PNG);
-    assert.strictEqual(ok.status, 201);
-    assert.match(ok.body.upload_id, /^img_/);
-    assert.deepStrictEqual([ok.body.filename, ok.body.bytes, ok.body.expires_in], ['banner.png', PNG.length, 3600]);
+  it('accepts image and video uploads only from connections that can send, and only real media', async () => {
+    const image = await upload(tokens.sender, PNG);
+    assert.strictEqual(image.status, 201);
+    assert.match(image.body.upload_id, /^up_/);
+    assert.deepStrictEqual(
+      [image.body.filename, image.body.kind, image.body.bytes, image.body.expires_in],
+      ['banner.png', 'image', PNG.length, 3600],
+    );
+    const video = await upload(tokens.sender, MP4, 'demo.mov');
+    assert.deepStrictEqual([video.status, video.body.kind, video.body.filename], [201, 'video', 'demo.mp4']);
 
     assert.strictEqual((await upload(tokens.reader, PNG)).status, 403);
-    assert.strictEqual((await upload(tokens.sender, Buffer.from('not an image'))).status, 415);
+    assert.strictEqual(
+      (await upload(tokens.sender, Buffer.from('not an image or a video, just text'.repeat(3)))).status,
+      415,
+    );
     const anon = await fetch(`${base}/uploads`, { method: 'POST', body: PNG });
     assert.strictEqual(anon.status, 401);
   });
 
-  it('posts an uploaded image with its caption in one message, and explains how to upload', async () => {
+  it('streams an uploaded video to Slack with its caption in one message, then deletes it', async () => {
     const client = await connect(tokens.sender);
     const tool = (await client.listTools()).tools.find((t) => t.name === 'slack_send_message');
-    assert.match(tool?.description || '', /curl -sS -X POST "https:\/\/fenix-mcp\.example\.com\/uploads/);
+    assert.match(tool?.description || '', /curl -sS -T <path to file> "https:\/\/fenix-mcp\.example\.com\/uploads/);
     assert.match(tool?.description || '', /~\/\.fenix_mcp_token_srv-sender/);
+    assert.match(tool?.description || '', /MP4, MOV or WebM up to 200 MB/);
 
-    const { body } = await upload(tokens.sender, PNG);
+    const { body } = await upload(tokens.sender, MP4, 'demo.mp4');
     const r = await client.callTool({
       name: 'slack_send_message',
-      arguments: { to: 'me', text: 'New banner', image: body.upload_id, image_alt: 'Fenix banner' },
+      arguments: { to: 'me', text: 'New demo', attachment: body.upload_id, attachment_alt: 'Product demo' },
     });
     assert.match(/** @type {any} */ (r.content)[0].text, /^Sent to me\. https:\/\/acme\.slack\.com\/files\//);
-    const args = slack.files.uploadV2.mock.calls.at(-1).arguments[0];
-    assert.deepStrictEqual(
-      [args.channel_id, args.initial_comment, args.filename, args.alt_text, args.file.length],
-      [`D-${OWNER}`, 'New banner', 'banner.png', 'Fenix banner', PNG.length],
-    );
+    assert.deepStrictEqual(slack.files.getUploadURLExternal.mock.calls.at(-1).arguments[0], {
+      filename: 'demo.mp4',
+      length: MP4.length,
+      alt_txt: 'Product demo',
+    });
+    assert.deepStrictEqual(received['demo.mp4'], { bytes: MP4.length, type: 'video/mp4', length: String(MP4.length) });
+    const done = slack.files.completeUploadExternal.mock.calls.at(-1).arguments[0];
+    assert.deepStrictEqual([done.channel_id, done.initial_comment], [`D-${OWNER}`, 'New demo']);
+    assert.ok(!readdirSync(uploadDir).includes(body.upload_id), 'the file is deleted once posted');
 
     const reused = await client.callTool({
       name: 'slack_send_message',
-      arguments: { to: 'me', image: body.upload_id },
+      arguments: { to: 'me', attachment: body.upload_id },
     });
     assert.ok(reused.isError, 'an upload is attached once');
     await client.close();
   });
 
-  it('carries an image through Slack approval and posts it on Send', async () => {
+  it('still accepts the older `image` parameter', async () => {
+    const client = await connect(tokens.sender);
+    const { body } = await upload(tokens.sender, PNG, 'old.png');
+    const r = await client.callTool({ name: 'slack_send_message', arguments: { to: 'me', image: body.upload_id } });
+    assert.ok(!r.isError);
+    assert.strictEqual(received['old.png']?.bytes, PNG.length);
+    await client.close();
+  });
+
+  it('previews an attachment in the approval DM, posts it on Send, and deletes it', async () => {
     const drafter = await connect(tokens.drafter);
     const sender = await connect(tokens.sender);
-    const { body } = await upload(tokens.drafter, PNG, 'chart.png');
+    const { body } = await upload(tokens.drafter, MP4, 'clip.mp4');
     // Another client cannot use this upload
     const stolen = await sender.callTool({
       name: 'slack_send_message',
-      arguments: { to: 'me', image: body.upload_id },
+      arguments: { to: 'me', attachment: body.upload_id },
     });
     assert.ok(stolen.isError);
 
-    const uploadsBefore = slack.files.uploadV2.mock.callCount();
-    const r = await drafter.callTool({ name: 'slack_send_message', arguments: { to: 'me', image: body.upload_id } });
+    const completions = slack.files.completeUploadExternal.mock.callCount();
+    const r = await drafter.callTool({
+      name: 'slack_send_message',
+      arguments: { to: 'C0NEWS01', text: 'Release clip', attachment: body.upload_id },
+    });
     assert.match(/** @type {any} */ (r.content)[0].text, /^Not posted yet/);
-    assert.strictEqual(slack.files.uploadV2.mock.callCount(), uploadsBefore, 'nothing uploaded before approval');
+    // One upload so far: the preview, into the owner's DM, before the buttons
+    assert.strictEqual(slack.files.completeUploadExternal.mock.callCount(), completions + 1);
+    const preview = slack.files.completeUploadExternal.mock.calls.at(-1).arguments[0];
+    assert.strictEqual(preview.channel_id, `D-${OWNER}`);
+    assert.match(preview.initial_comment, /Preview: \*srv-drafter\* wants to post this to \*C0NEWS01\*/);
     const dm = slack.chat.postMessage.mock.calls.at(-1).arguments[0];
-    assert.match(JSON.stringify(dm.blocks), /With image `chart\.png`/);
+    assert.match(JSON.stringify(dm.blocks), /:film_frames: With video `clip\.mp4` \(1 KB\) · preview above/);
+    assert.ok(readdirSync(uploadDir).includes(body.upload_id), 'the file waits with the draft');
 
     await click(SEND_ACTION);
-    assert.strictEqual(slack.files.uploadV2.mock.callCount(), uploadsBefore + 1);
-    assert.strictEqual(slack.files.uploadV2.mock.calls.at(-1).arguments[0].filename, 'chart.png');
+    const posted = slack.files.completeUploadExternal.mock.calls.at(-1).arguments[0];
+    assert.deepStrictEqual([posted.channel_id, posted.initial_comment], ['C0NEWS01', 'Release clip']);
+    assert.ok(!existsSync(join(uploadDir, body.upload_id)), 'the file is deleted after the decision');
     await drafter.close();
     await sender.close();
+  });
+
+  it('deletes a discarded attachment without posting it', async () => {
+    const drafter = await connect(tokens.drafter);
+    const { body } = await upload(tokens.drafter, PNG, 'nope.png');
+    await drafter.callTool({ name: 'slack_send_message', arguments: { to: 'me', attachment: body.upload_id } });
+    const completions = slack.files.completeUploadExternal.mock.callCount();
+    await click(DISCARD_ACTION);
+    assert.strictEqual(slack.files.completeUploadExternal.mock.callCount(), completions);
+    assert.ok(!existsSync(join(uploadDir, body.upload_id)));
+    await drafter.close();
   });
 
   it('rejects revoked tokens on the next request', async () => {

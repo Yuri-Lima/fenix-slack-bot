@@ -31,7 +31,8 @@
     "botId": "B0123456789",
     "prometheusUid": "prometheus",
     "lokiUid": "loki",
-    "replyMode": "dm"
+    "replyMode": "dm",
+    "ignoreHosts": ["test"]
   },
   "timeZone": "Europe/Berlin",
   "mcp": {

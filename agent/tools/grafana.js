@@ -5,6 +5,8 @@ import {
   collectHostEvidence,
   diagnose,
   evidenceFields,
+  ignoredBy,
+  ignoredHostMessage,
   lastSeenWithin,
   logHosts,
   notableKinds,
@@ -32,6 +34,7 @@ export const hostHealthTool = tool(
     minutes: z.number().min(5).max(180).optional().describe('How far back to look (default 30).'),
   },
   async ({ host, minutes = 30 }) => {
+    if (ignoredBy(host)) return textResult(ignoredHostMessage(host));
     try {
       const evidence = await collectHostEvidence(host, { start: Math.floor(Date.now() / 1000) - minutes * 60 });
       if (evidence.reachability.nodeLastSeen === null && evidence.cpus === null) {
@@ -84,7 +87,11 @@ export const hostLogsTool = tool(
   },
   async ({ host, minutes = 15, service, search, problems_only: problemsOnly }) => {
     try {
-      const match = resolveLogHost(host, await logHosts());
+      if (ignoredBy(host)) return textResult(ignoredHostMessage(host));
+      const match = resolveLogHost(
+        host,
+        (await logHosts()).filter((h) => !ignoredBy(h)),
+      );
       if ('candidates' in match) {
         return match.candidates.length
           ? textResult(

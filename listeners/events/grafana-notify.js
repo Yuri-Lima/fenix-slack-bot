@@ -5,6 +5,7 @@ import {
   collectHostEvidence,
   diagnose,
   evidenceFields,
+  ignoredBy,
   VERDICT_STATUS,
 } from '../../integrations/host-health.js';
 import { andMore } from '../../utils/helpers.js';
@@ -305,8 +306,14 @@ export async function handleGrafanaNotify({ client, event, logger }) {
   const message = /** @type {any} */ (event);
   if (!botId || message.bot_id !== botId || replyMode === 'off') return;
 
-  const alert = parseGrafanaAlert(message);
-  if (!alert || alert.entries.length === 0) return;
+  const parsed = parseGrafanaAlert(message);
+  if (!parsed) return;
+  // Excluded hosts (grafana.ignoreHosts, e.g. test servers) are neither analysed nor listed
+  const entries = parsed.entries
+    .map((e) => ({ ...e, hosts: e.hosts.filter((h) => !ignoredBy(h)) }))
+    .filter((e) => e.hosts.length > 0 && !ignoredBy(targetHost(e)));
+  if (entries.length === 0) return;
+  const alert = { ...parsed, entries };
 
   const startedAt = Date.now();
   try {

@@ -259,7 +259,7 @@ the Fenix server.
   - `slack_users` (read-only, every connection): the people Fenix can message, with handle, user ID, title,
     active/away, custom status (vacation, sick, focus...) and when it clears, huddles, and local time.
   - `slack_send_message` (connections with the `send` scope; see *Other MCP clients*): posts as Fenix to `me` (a DM to the owner),
-    `#channel`, `@person`, a Slack ID, or a thread given by its message link, optionally with an uploaded image,
+    `#channel`, `@person`, a Slack ID, or a thread given by its message link, optionally with an uploaded image or video,
     and returns the message link. For a DM
     it also notes the recipient's status. It is not marked read-only, so Claude Code asks before each send; clients
     registered with Slack approval only draft, and OAuth sign-ins from Claude app connectors never get it.
@@ -317,19 +317,22 @@ npm run -s vps:mcp-client -- revoke grok      # creating the same name again rot
 Clients with Slack approval get the draft in each owner's DM with **Send / Discard** buttons; the tool call returns
 straight away and says so. Drafts expire after 30 minutes and live in memory only.
 
-**Images.** `slack_send_message` can attach an image (PNG, JPEG, GIF or WebP, up to 10 MB), posted with the text as
-its caption in one message. The bytes never pass through the model: the client uploads them with one shell command
-and passes the returned `upload_id` as `image` (the tool description gives each connection its exact command):
+**Images and videos.** `slack_send_message` can attach an image (PNG, JPEG, GIF, WebP) or a video (MP4, MOV,
+WebM), posted with the text as its caption in one message; Slack plays videos inline. The bytes never pass through
+the model: the client uploads the file with one shell command and passes the returned `upload_id` as `attachment`
+(the tool description gives each connection its exact command; `image` still works as the older name):
 
 ```sh
-curl -sS -X POST "https://<your-fenix-domain>/uploads?filename=banner.png" \
-  -H "Authorization: Bearer $(cat ~/.fenix_mcp_token)" --data-binary @banner.png
-# {"upload_id":"img_...","filename":"banner.png","bytes":503787,"expires_in":3600}
+curl -sS -T demo.mp4 "https://<your-fenix-domain>/uploads?filename=demo.mp4" \
+  -H "Authorization: Bearer $(cat ~/.fenix_mcp_token)"
+# {"upload_id":"up_...","filename":"demo.mp4","kind":"video","bytes":24117248,"expires_in":3600}
 ```
 
-Only connections with the `send` scope can upload. An upload belongs to the client that made it, works once, is
-checked to be a real image by its first bytes, and expires after an hour (memory only). With Slack approval, the
-draft names the attached image and Fenix uploads it to Slack on **Send**.
+Uploads stream to disk (`data/uploads/`, private files, cleared on start) and on to Slack, never into memory. Only
+connections with the `send` scope can upload. An upload belongs to the client that made it, works once, is checked
+to be a real image or video by its first bytes, and expires after an hour. Limits: `mcp.maxUploadMb` per file (default
+200) and `mcp.maxUploadTotalMb` held at once (default 1024). With Slack approval, the file is first uploaded into the
+owner's DM as a preview, so they can look at or play it before clicking **Send**; it is deleted once decided.
 
 **Grok CLI** (`~/.grok/config.toml`; Grok reads the token file on every request):
 
@@ -429,8 +432,10 @@ cp fenix.config.example.json fenix.config.json
 | `grafana.url` / `grafana.botId` | Grafana base URL and the Slack bot ID of the Grafana app, whose alert posts trigger the analysis. |
 | `grafana.prometheusUid` / `grafana.lokiUid` | Data source UIDs for metrics and logs. |
 | `grafana.replyMode` | `dm` (default) sends analyses to `adminDmChannel` as a preview, `thread` replies under the alert, `off` disables it. |
+| `grafana.ignoreHosts` | Parts of server names Fenix never analyses, case-insensitive (e.g. `["test"]`): their alerts get no reply and `host_logs` / `host_health` decline them. Default none. |
 | `mcp.enabled` / `mcp.host` / `mcp.port` / `mcp.path` | MCP endpoint for Claude Code (default off, `127.0.0.1:8787/mcp`). |
 | `mcp.publicUrl` / `mcp.oauthRedirectUris` / `mcp.cimdOrigins` | Public HTTPS origin of the endpoint, which turns on OAuth sign-in for Claude app connectors; the callback URLs clients may register; and the origins whose client metadata documents may be fetched (defaults: Claude's). |
+| `mcp.maxUploadMb` / `mcp.maxUploadTotalMb` | Largest image or video an MCP client may upload for `slack_send_message` (default 200 MB), and the total held on disk at once (default 1024 MB). |
 | `usage.retentionMonths` | Months of usage logs to keep (default 12). |
 | `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |

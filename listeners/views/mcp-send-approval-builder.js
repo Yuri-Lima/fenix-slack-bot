@@ -1,3 +1,5 @@
+import { formatBytes } from '../../utils/helpers.js';
+
 /** @typedef {import('@slack/types').KnownBlock} Block */
 
 export const SEND_ACTION = 'mcp_send_approve';
@@ -24,18 +26,20 @@ function quotedSections(text) {
 }
 
 /**
- * The draft's body: its text quoted, and the attached image named (Slack cannot preview it before it is posted).
+ * The draft's body: its text quoted, and its image or video named (the file itself is previewed just above).
  * @param {import('../../mcp/send-approval.js').Draft} draft
  * @returns {Block[]}
  */
 function draftBody(draft) {
   /** @type {Block[]} */
   const blocks = draft.text ? quotedSections(draft.text) : [];
-  if (draft.image) {
-    const kb = Math.max(1, Math.round(draft.image.data.length / 1024));
+  if (draft.attachment) {
+    const { kind, filename, size } = draft.attachment;
+    const icon = kind === 'video' ? ':film_frames:' : ':frame_with_picture:';
+    const preview = draft.previewFailed ? 'the preview could not be shown' : 'preview above';
     blocks.push({
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: `:frame_with_picture: With image \`${draft.image.filename}\` (${kb} KB)` }],
+      elements: [{ type: 'mrkdwn', text: `${icon} With ${kind} \`${filename}\` (${formatBytes(size)}) · ${preview}` }],
     });
   }
   return blocks;

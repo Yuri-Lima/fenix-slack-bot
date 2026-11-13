@@ -62,6 +62,26 @@ export const q = (value) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
  */
 export const re = (value) => q(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 
+/**
+ * The configured name part that excludes a host from analysis (`grafana.ignoreHosts`, case-insensitive),
+ * e.g. "test" for test servers, or null when the host is analysed.
+ * @param {string} host
+ * @returns {string | null}
+ */
+export function ignoredBy(host) {
+  const name = host.toLowerCase();
+  return config.grafana.ignoreHosts.find((part) => part && name.includes(String(part).toLowerCase())) ?? null;
+}
+
+/**
+ * Tool answer for an excluded host: short, so the model spends no tokens on it.
+ * @param {string} host
+ * @returns {string}
+ */
+export function ignoredHostMessage(host) {
+  return `${host} is not analysed: server names containing "${ignoredBy(host)}" are excluded (test servers). Tell the user.`;
+}
+
 /** Hosts that sent logs within this window can be found by name. */
 const HOST_LOOKBACK_SEC = 24 * 60 * 60;
 const HOSTS_TTL_MS = 10 * 60 * 1000;

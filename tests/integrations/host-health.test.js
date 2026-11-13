@@ -5,6 +5,8 @@ import {
   alertKind,
   clip,
   diagnose,
+  ignoredBy,
+  ignoredHostMessage,
   logPattern,
   readableLogLine,
   VERDICT_STATUS,
@@ -258,5 +260,16 @@ describe('VERDICT_STATUS', () => {
       assert.match(emoji, /^:[a-z_]+:$/);
       assert.ok(label.length > 0);
     }
+  });
+});
+
+describe('ignoredBy', () => {
+  it('excludes hosts containing a configured name part, ignoring case', () => {
+    assert.strictEqual(ignoredBy('shop-TEST-01'), 'test');
+    assert.strictEqual(ignoredBy('alpha'), null);
+    assert.match(
+      ignoredHostMessage('shop-test'),
+      /^shop-test is not analysed: server names containing "test" are excluded/,
+    );
   });
 });

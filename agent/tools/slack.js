@@ -2,6 +2,7 @@ import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { config } from '../../config.js';
 import { textResult } from '../../utils/helpers.js';
+import { uploadFileToSlack } from '../../utils/slack.js';
 
 /** Longest message accepted; Slack truncates the display of longer text. */
 export const MAX_MESSAGE_CHARS = 4000;
@@ -358,8 +359,8 @@ export function describeStatus(member) {
  */
 
 /**
- * An image to post with the message.
- * @typedef {{ data: Buffer, filename: string, alt?: string }} SendImage
+ * An image or video to post with the message: a file on disk (an upload), plus how to let it go.
+ * @typedef {import('../../utils/slack.js').SlackFile & { kind: 'image' | 'video', release: () => void }} SendAttachment
  */
 
 /**
@@ -441,35 +442,33 @@ async function postText(client, target, text) {
 }
 
 /**
- * Upload an image with `text` as its caption; returns the file's link.
+ * Post an image or video with `text` as its caption, in one message; returns the file's link.
  * File uploads need a conversation ID, so a user ID is first turned into Fenix's DM with them.
  * @param {import('@slack/web-api').WebClient} client
  * @param {SendTarget} target
  * @param {string} text
- * @param {SendImage} image
+ * @param {SendAttachment} attachment
  * @returns {Promise<string | null>}
  */
-async function uploadImage(client, target, text, image) {
-  let channel = target.channel;
-  if (/^[UW]/.test(channel)) {
-    const dm = await client.conversations.open({ users: channel });
-    channel = /** @type {string} */ (dm.channel?.id);
-  }
-  // Slack's types want thread_ts either set or absent, not undefined
-  /** @type {any} */
-  const args = {
-    channel_id: channel,
-    file: image.data,
-    filename: image.filename,
-    title: image.filename,
-    ...(target.threadTs ? { thread_ts: target.threadTs } : {}),
-    ...(image.alt ? { alt_text: image.alt } : {}),
-    ...(text ? { initial_comment: text } : {}),
-  };
-  /** @type {any} */
-  const uploaded = await client.files.uploadV2(args);
-  const file = uploaded.files?.[0]?.files?.[0] || uploaded.files?.[0];
-  return file?.permalink || null;
+async function postAttachment(client, target, text, attachment) {
+  return uploadFileToSlack(client, {
+    channel: await conversationFor(client, target.channel),
+    threadTs: target.threadTs,
+    comment: text,
+    file: attachment,
+  });
+}
+
+/**
+ * A conversation ID for a channel or user: users get Fenix's DM with them.
+ * @param {import('@slack/web-api').WebClient} client
+ * @param {string} channelOrUser
+ * @returns {Promise<string>}
+ */
+export async function conversationFor(client, channelOrUser) {
+  if (!/^[UW]/.test(channelOrUser)) return channelOrUser;
+  const dm = await client.conversations.open({ users: channelOrUser });
+  return /** @type {string} */ (dm.channel?.id);
 }
 
 /**
@@ -478,13 +477,15 @@ async function uploadImage(client, target, text, image) {
  * @param {import('@slack/web-api').WebClient} client
  * @param {SlackDirectory} directory
  * @param {SendTarget} target
- * @param {string} text - may be empty when an image is attached
- * @param {SendImage} [image] - posted with `text` as its caption, in one message
+ * @param {string} text - may be empty when an attachment is given
+ * @param {SendAttachment} [attachment] - posted with `text` as its caption, in one message (the caller releases it)
  * @returns {Promise<ReturnType<typeof textResult>>}
  */
-export async function deliverMessage(client, directory, target, text, image) {
+export async function deliverMessage(client, directory, target, text, attachment) {
   try {
-    const link = image ? await uploadImage(client, target, text, image) : await postText(client, target, text);
+    const link = attachment
+      ? await postAttachment(client, target, text, attachment)
+      : await postText(client, target, text);
     const bot = await directory.bot();
     const as = bot ? ` as "${bot.name}" (@${bot.handle})` : '';
     const sent = `Sent${as} to ${target.where}.${link ? ` ${link}` : ''}`;
@@ -503,15 +504,15 @@ export async function deliverMessage(client, directory, target, text, image) {
 
 /**
  * @typedef {Object} SendToolOptions
- * @property {(target: SendTarget, text: string, image?: SendImage) => Promise<ReturnType<typeof textResult>>} [approve]
- *   instead of posting, hand the resolved draft to the owner for approval
- * @property {(id: string) => { data: Buffer, filename: string } | null} [takeImage]
- *   turn an upload_id into the image (once); without it the tool takes no images
- * @property {string} [uploadHint] - how this connection uploads an image, shown in the tool description
+ * @property {(target: SendTarget, text: string, attachment?: SendAttachment) => Promise<ReturnType<typeof textResult>>} [approve]
+ *   instead of posting, hand the resolved draft to the owner for approval (it then owns the attachment)
+ * @property {(id: string) => Omit<SendAttachment, 'alt'> | null} [takeAttachment]
+ *   turn an upload_id into its image or video (once); without it the tool takes no attachments
+ * @property {string} [uploadHint] - how this connection uploads a file, shown in the tool description
  */
 
 /**
- * Tool that posts a message as Fenix to a channel, a DM or a thread, optionally with an image.
+ * Tool that posts a message as Fenix to a channel, a DM or a thread, optionally with an image or video.
  * It changes something, so it is never in READ_ONLY_TOOLS: the MCP server offers it only to
  * connections allowed to send.
  * @param {import('@slack/web-api').WebClient} client
@@ -521,7 +522,7 @@ export async function deliverMessage(client, directory, target, text, image) {
 export function createSlackSendMessageTool(
   client,
   directory = createSlackDirectory(client),
-  { approve, takeImage, uploadHint } = {},
+  { approve, takeAttachment, uploadHint } = {},
 ) {
   return tool(
     'slack_send_message',
@@ -529,10 +530,10 @@ export function createSlackSendMessageTool(
       'Write the finished message in Slack mrkdwn; it is sent exactly as given. Returns the message link. ' +
       'Before DMing someone, check slack_users for the right person and tell the user if they are away or on ' +
       'vacation. If a channel is not found, check slack_channels for the exact name before suggesting an invite.' +
-      (takeImage
-        ? ' To attach an image, upload it first and pass the returned upload_id as `image`' +
+      (takeAttachment
+        ? ' To attach an image or video, upload the file first and pass the returned upload_id as `attachment`' +
           (uploadHint ? `: ${uploadHint}` : '.') +
-          ' The text becomes the image caption in the same message.'
+          ' The text becomes its caption in the same message.'
         : '') +
       (approve
         ? ' On this connection every message first goes to the owner in Slack, who must click Send before it is posted.'
@@ -551,7 +552,7 @@ export function createSlackSendMessageTool(
         .optional()
         .describe(
           'The message in Slack mrkdwn: *bold*, _italic_, `code`, ```blocks```, <https://url|label>, <@U123> mentions. ' +
-            'Required unless an image is attached.',
+            'Required unless an attachment is given.',
         ),
       thread: z
         .string()
@@ -559,31 +560,45 @@ export function createSlackSendMessageTool(
         .describe(
           'Reply in a thread: the link to a message in it (https://<workspace>.slack.com/archives/…) or its ts.',
         ),
-      ...(takeImage
+      ...(takeAttachment
         ? {
-            image: z.string().optional().describe('upload_id of an image uploaded to Fenix (see the description).'),
-            image_alt: z.string().max(1000).optional().describe('Short description of the image for screen readers.'),
+            attachment: z
+              .string()
+              .optional()
+              .describe('upload_id of an image or video uploaded to Fenix (see the description).'),
+            attachment_alt: z
+              .string()
+              .max(1000)
+              .optional()
+              .describe('Short description of the image or video for screen readers.'),
+            image: z.string().optional().describe('Same as `attachment` (older name).'),
+            image_alt: z.string().max(1000).optional().describe('Same as `attachment_alt` (older name).'),
           }
         : {}),
     },
-    async (/** @type {any} */ { to, text = '', thread, image, image_alt }) => {
-      if (!text.trim() && !image) return textResult('Give the message `text`, an `image`, or both.', true);
+    async (/** @type {any} */ { to, text = '', thread, attachment, attachment_alt, image, image_alt }) => {
+      const uploadId = attachment || image;
+      if (!text.trim() && !uploadId) return textResult('Give the message `text`, an `attachment`, or both.', true);
       const target = await resolveSendTarget(directory, { to, thread });
       if ('error' in target) return textResult(target.error, true);
-      /** @type {SendImage | undefined} */
-      let attached;
-      if (image) {
-        const upload = takeImage?.(image);
-        if (!upload) {
-          return textResult(
-            `No image "${image}" for this connection: it expired (uploads last 1 hour), was already used, ` +
-              'or was uploaded with another token. Upload it again.',
-            true,
-          );
-        }
-        attached = { data: upload.data, filename: upload.filename, alt: image_alt };
+      if (!uploadId) return approve ? approve(target, text) : deliverMessage(client, directory, target, text);
+
+      const upload = takeAttachment?.(uploadId);
+      if (!upload) {
+        return textResult(
+          `No upload "${uploadId}" for this connection: it expired (uploads last 1 hour), was already used, ` +
+            'or was uploaded with another token. Upload it again.',
+          true,
+        );
       }
-      return approve ? approve(target, text, attached) : deliverMessage(client, directory, target, text, attached);
+      /** @type {SendAttachment} */
+      const file = { ...upload, alt: attachment_alt || image_alt };
+      if (approve) return approve(target, text, file); // the draft owns the file now
+      try {
+        return await deliverMessage(client, directory, target, text, file);
+      } finally {
+        file.release();
+      }
     },
   );
 }
