@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import { compact } from '../utils/helpers.js';
-import { lokiInstant, lokiRange, promQuery, promRange } from './grafana.js';
+import { lokiInstant, lokiLabelValues, lokiRange, promQuery, promRange } from './grafana.js';
 
 // Evidence about one host over a time window, gathered from Prometheus
 // (node_exporter, Phoenix health exporter) and Loki, plus the diagnosis that
@@ -9,7 +9,8 @@ import { lokiInstant, lokiRange, promQuery, promRange } from './grafana.js';
 
 /** Seconds of context collected before an alert started. */
 export const LEAD_IN_SEC = 15 * 60;
-const ERROR_LINE_RE = '(?i)(error|exception|fatal|panic|killed|oom|timeout|refused|unreachable)';
+/** LogQL regex for lines that report a problem. */
+export const ERROR_LINE_RE = '(?i)(error|exception|fatal|panic|killed|oom|timeout|refused|unreachable)';
 const MAX_ERROR_LINES = 300;
 /** Errors that explain tasks waiting without using CPU (load average up, CPU idle). */
 const WAIT_CAUSE_RE = /pool exhausted|timed? ?out|connection reset|connection refused|deadlock|lock wait/i;
@@ -52,14 +53,44 @@ export function alertKind(title) {
  * @param {string} value
  * @returns {string}
  */
-const q = (value) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+export const q = (value) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
 /**
  * Escape a host name for use inside a regex label matcher.
  * @param {string} value
  * @returns {string}
  */
-const re = (value) => q(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+export const re = (value) => q(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+
+/** Hosts that sent logs within this window can be found by name. */
+const HOST_LOOKBACK_SEC = 24 * 60 * 60;
+const HOSTS_TTL_MS = 10 * 60 * 1000;
+/** @type {{ at: number, hosts: string[] } | null} */
+let hostsCache = null;
+
+/**
+ * Every host that sent logs in the last day (Loki `host` label), cached for ten minutes.
+ * @returns {Promise<string[]>}
+ */
+export async function logHosts() {
+  if (hostsCache && Date.now() - hostsCache.at < HOSTS_TTL_MS) return hostsCache.hosts;
+  const now = Math.floor(Date.now() / 1000);
+  const hosts = await lokiLabelValues('host', now - HOST_LOOKBACK_SEC, now);
+  hostsCache = { at: Date.now(), hosts };
+  return hosts;
+}
+
+/**
+ * The Loki `host` for a host named in an alert or metric: the same name, ignoring case.
+ * Exact on purpose: a prefix would also pull in hosts like `<name>-staging`.
+ * Falls back to the name itself when the host list cannot be read.
+ * @param {string} host
+ * @returns {Promise<string>}
+ */
+export async function lokiHostFor(host) {
+  const hosts = await logHosts().catch(() => []);
+  return hosts.find((h) => h.toLowerCase() === host.toLowerCase()) ?? host;
+}
 
 /**
  * @template T
@@ -103,8 +134,8 @@ const MAX_SAMPLE_CHARS = 1000;
 
 /**
  * A log line as people should read it: no colour codes, no leading timestamp or nginx
- * worker ids, no client IP, and health-check JSON without the components that are up,
- * so the failing part comes first.
+ * worker ids, no client IP, no secrets, and health-check JSON without the components that
+ * are up, so the failing part comes first.
  * @param {string} line
  * @returns {string}
  */
@@ -120,6 +151,13 @@ export function readableLogLine(line) {
       // nginx "37#37: *954 " worker/connection ids and the client address
       .replace(/\b\d+#\d+: (\*\d+ )?/, '')
       .replace(/,? client: [^,]+,/, ',')
+      // Secrets: key=value / "key":"value" pairs, bearer tokens, passwords in URLs
+      .replace(
+        /\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)(["']?\s*[:=]\s*["']?)(?:Bearer\s+)?[^\s"',;&]+/gi,
+        '$1$2[redacted]',
+      )
+      .replace(/\bBearer\s+[\w.~+/-]+=*/g, 'Bearer [redacted]')
+      .replace(/(\b[a-z][\w+.-]*:\/\/[^:/\s@]+:)[^@/\s]+@/gi, '$1[redacted]@')
       // Health-check JSON: drop the components that are fine
       .replace(/"[\w-]+":\{"status":"up"\},?/g, '')
       .replace(/,\}/g, '}')
@@ -187,7 +225,7 @@ export async function collectHostEvidence(host, { start, end }) {
   const from = start - LEAD_IN_SEC;
   const step = Math.max(30, Math.round((to - from) / 40));
   const H = q(host);
-  const HR = re(host);
+  const L = q(await lokiHostFor(host));
   const windowSec = Math.max(60, to - from);
 
   const [
@@ -246,8 +284,8 @@ export async function collectHostEvidence(host, { start, end }) {
     settle(promQuery(`timestamp(node_load1{instance="${H}"})`, to)),
     settle(promQuery(`up{instance="${H}-health-exporter"}`, to)),
     settle(promRange(`{__name__=~"phoenix_.*_from_py",server_name="${H}"}`, from, to, Math.min(step, 60))),
-    settle(lokiInstant(`sum by (service) (count_over_time({host=~"${HR}.*"}[${windowSec}s]))`, to)),
-    settle(lokiRange(`{host=~"${HR}.*"} |~ "${q(ERROR_LINE_RE)}"`, from, to, MAX_ERROR_LINES)),
+    settle(lokiInstant(`sum by (service) (count_over_time({host="${L}"}[${windowSec}s]))`, to)),
+    settle(lokiRange(`{host="${L}"} |~ "${q(ERROR_LINE_RE)}"`, from, to, MAX_ERROR_LINES)),
   ]);
 
   // CPU: average share per mode while the alert was active
@@ -625,14 +663,16 @@ function topService(byService) {
 }
 
 /**
- * HH:MM in the configured time zone (the one the alerts are shown in).
+ * HH:MM (or HH:MM:SS) in the configured time zone (the one the alerts are shown in).
  * @param {number} sec
+ * @param {{ seconds?: boolean }} [options]
  * @returns {string}
  */
-export function clock(sec) {
+export function clock(sec, { seconds = false } = {}) {
   return new Date(sec * 1000).toLocaleTimeString('en-GB', {
     hour: '2-digit',
     minute: '2-digit',
+    ...(seconds && { second: '2-digit' }),
     timeZone: config.timeZone,
   });
 }

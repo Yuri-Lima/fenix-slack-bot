@@ -6,9 +6,11 @@ import {
   diagnose,
   evidenceFields,
   lastSeenWithin,
+  logHosts,
   notableKinds,
   VERDICT_STATUS,
 } from '../../integrations/host-health.js';
+import { formatHostLogs, MAX_LOG_MINUTES, readHostLogs, resolveLogHost } from '../../integrations/host-logs.js';
 import { textResult } from '../../utils/helpers.js';
 
 const STATUS_ORDER = ['down', 'action', 'watch', 'false-alarm'];
@@ -60,6 +62,43 @@ export const hostHealthTool = tool(
       return textResult(lines.join('\n'));
     } catch (e) {
       return textResult(`Host health failed: ${/** @type {Error} */ (e).message}`, true);
+    }
+  },
+);
+
+/** Similar host names mentioned next to the one that was read. */
+const MAX_SIMILAR = 5;
+
+export const hostLogsTool = tool(
+  'host_logs',
+  "Read one server's recent logs from Grafana Loki, grouped into a timeline (repeated lines counted, " +
+    'secrets masked). Use when someone asks what happened on a server or client in the last minutes, ' +
+    'or to look for a specific error or text in its logs. Accepts the name people use (case and dashes ' +
+    'do not matter); if it matches several servers the result lists them.',
+  {
+    host: z.string().describe("Server or client name, e.g. 'web-01'."),
+    minutes: z.number().int().min(1).max(MAX_LOG_MINUTES).optional().describe('How far back to read (default 15).'),
+    service: z.string().optional().describe('Only this service, as named in the logs (see the totals line).'),
+    search: z.string().optional().describe('Only lines containing this text (case-insensitive).'),
+    problems_only: z.boolean().optional().describe('Only lines that look like errors, timeouts or kills.'),
+  },
+  async ({ host, minutes = 15, service, search, problems_only: problemsOnly }) => {
+    try {
+      const match = resolveLogHost(host, await logHosts());
+      if ('candidates' in match) {
+        return match.candidates.length
+          ? textResult(
+              `"${host}" matches several servers: ${match.candidates.slice(0, 10).join(', ')}. Ask which one is meant.`,
+            )
+          : textResult(`No server named like "${host}" sent logs in the last 24 hours. Check the name.`, true);
+      }
+      const logs = await readHostLogs(match.host, { minutes, service, search, problemsOnly });
+      const similar = match.similar.length
+        ? `\nOther servers with a similar name: ${match.similar.slice(0, MAX_SIMILAR).join(', ')}.`
+        : '';
+      return textResult(formatHostLogs(logs, { service, search, problemsOnly }) + similar);
+    } catch (e) {
+      return textResult(`Reading logs failed: ${/** @type {Error} */ (e).message}`, true);
     }
   },
 );

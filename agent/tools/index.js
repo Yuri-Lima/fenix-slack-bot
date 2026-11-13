@@ -1,6 +1,6 @@
 import { flakyTestsTool, flakyTrendsTool, testTimelineTool } from './flaky-tracker.js';
 import { listFilesTool, readFileTool, recentCommitsTool, searchCodeTool } from './gitlab.js';
-import { hostHealthTool } from './grafana.js';
+import { hostHealthTool, hostLogsTool } from './grafana.js';
 import {
   createSlackChannelsTool,
   createSlackDirectory,
@@ -29,6 +29,7 @@ export const ALL_TOOLS = [
   getIssueTool,
   getTestDetailTool,
   hostHealthTool,
+  hostLogsTool,
   listBuildConfigsTool,
   listFilesTool,
   listRecentBuildsTool,
@@ -55,6 +56,7 @@ export const READ_ONLY_TOOLS = [
   getIssueTool,
   getTestDetailTool,
   hostHealthTool,
+  hostLogsTool,
   listBuildConfigsTool,
   listFilesTool,
   listRecentBuildsTool,

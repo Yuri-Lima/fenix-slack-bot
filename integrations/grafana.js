@@ -60,20 +60,22 @@ export async function promRange(expr, startSec, endSec, stepSec) {
 /** @typedef {{ stream: Record<string, string>, values: Array<[string, string]> }} LokiStream */
 
 /**
- * Loki log query over a time range (oldest first).
+ * Loki log query over a time range. With a limit, `forward` returns the oldest lines and
+ * `backward` the newest; each stream's lines come in that order.
  * @param {string} expr - LogQL selector/pipeline
  * @param {number} startSec
  * @param {number} endSec
  * @param {number} limit
+ * @param {'forward' | 'backward'} [direction]
  * @returns {Promise<LokiStream[]>}
  */
-export async function lokiRange(expr, startSec, endSec, limit) {
+export async function lokiRange(expr, startSec, endSec, limit, direction = 'forward') {
   const params = new URLSearchParams({
     query: expr,
     start: `${Math.floor(startSec)}000000000`,
     end: `${Math.floor(endSec)}000000000`,
     limit: String(limit),
-    direction: 'forward',
+    direction,
   });
   const body = await grafanaGet(`/api/datasources/proxy/uid/${lokiUid}/loki/api/v1/query_range?${params}`);
   return body.data?.result || [];
@@ -89,6 +91,24 @@ export async function lokiInstant(expr, atSec) {
   const params = new URLSearchParams({ query: expr, time: `${Math.floor(atSec)}000000000` });
   const body = await grafanaGet(`/api/datasources/proxy/uid/${lokiUid}/loki/api/v1/query?${params}`);
   return body.data?.result || [];
+}
+
+/**
+ * Values of a Loki label (e.g. every `host` that sent logs) within a time range.
+ * @param {string} label
+ * @param {number} startSec
+ * @param {number} endSec
+ * @returns {Promise<string[]>}
+ */
+export async function lokiLabelValues(label, startSec, endSec) {
+  const params = new URLSearchParams({
+    start: `${Math.floor(startSec)}000000000`,
+    end: `${Math.floor(endSec)}000000000`,
+  });
+  const body = await grafanaGet(
+    `/api/datasources/proxy/uid/${lokiUid}/loki/api/v1/label/${encodeURIComponent(label)}/values?${params}`,
+  );
+  return body.data || [];
 }
 
 /**

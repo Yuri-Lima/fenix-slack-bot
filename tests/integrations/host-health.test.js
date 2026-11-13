@@ -225,6 +225,17 @@ describe('readableLogLine', () => {
   });
 });
 
+describe('readableLogLine secrets', () => {
+  it('masks passwords, tokens and credentials in URLs', () => {
+    const line = readableLogLine(
+      'login failed password=hunter2 token: "abc.def" Authorization: Bearer eyJhbGci.x.y url postgres://app:s3cret@db:5432/phx',
+    );
+    assert.ok(!/hunter2|abc\.def|eyJhbGci|s3cret/.test(line), line);
+    assert.match(line, /password=\[redacted\]/);
+    assert.match(line, /postgres:\/\/app:\[redacted\]@db/);
+  });
+});
+
 describe('clip', () => {
   it('keeps short text and cuts long text at a word with an ellipsis', () => {
     assert.strictEqual(clip('short', 10), 'short');

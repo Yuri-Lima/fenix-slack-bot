@@ -38,12 +38,13 @@ for this and assign it to me"* get answered in the thread where they were asked.
 |---|---|---|
 | 🔴 | **Automatic build-failure analysis** | Watches TeamCity notifications in Slack and replies in-thread with new vs. pre-existing failures, flaky tests, the real error behind Cypress/Docker boilerplate, and a ranked list of likely-culprit commits. Workers SIGKILLed by the host (OOM) are reported as infrastructure, not blamed on commits. |
 | 📈 | **Grafana alert analysis** | Explains each Grafana alert from real metrics and logs: whether load was real CPU pressure or waiting tasks, which Phoenix checks failed, whether the machine is unreachable, which errors coincided, how often it repeats, and what to do next. Fleet-wide alerts are reported as one central cause. |
+| 🪵 | **Server logs on request** | Ask "what happened on web-01 in the last 5 minutes?" and Fenix reads that server's logs from Grafana Loki (read-only), resolves the name you typed, groups repeated lines into a timeline with secrets masked, and answers your question instead of pasting logs. |
 | ♻️ | **Flaky-test tracker** | Answers "what's flaky?", "what got worse this week?", and "when did this test start failing?" from TeamCity's test history. |
 | 🎫 | **YouTrack assistant** | Search, read, create, and update issues in natural language, with explicit confirmation before any write. |
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
 | 📝 | **"Create YouTrack Ticket" shortcut** | Message shortcut that turns any Slack message (and its surrounding context) into a pre-filled ticket. |
 | 📊 | **Usage tracking** | Every agent reply ends with its model, tokens, cost and steps, plus the month to date. Every run is logged to a monthly file, and `report` gives a full usage report computed in code (no AI tokens). |
-| 🔌 | **Claude Code connection (MCP)** | An authenticated MCP endpoint serves Fenix's read-only tools (TeamCity, flaky tests, server health, codebase, YouTrack search, usage) to Claude Code, plus `slack_send_message` for the owner, so Claude can write a message and post it as Fenix. All service tokens stay on the Fenix server. |
+| 🔌 | **Claude Code connection (MCP)** | An authenticated MCP endpoint serves Fenix's read-only tools (TeamCity, flaky tests, server health and logs, codebase, YouTrack search, usage) to Claude Code, plus `slack_send_message` for the owner, so Claude can write a message and post it as Fenix. All service tokens stay on the Fenix server. |
 | 🧹 | **Thread cleanup** | `@Fenix delete` removes every message Fenix posted in a thread. |
 | 💬 | **Feedback loop** | 👍/👎 buttons on every answer plus conversational feedback capture, stored for the owner to review. |
 | 🛡️ | **Guardrails** | Owner allowlist, prompt-injection and credential-probing detection with strikes, a strict tool allowlist, and redaction rules. |
@@ -207,6 +208,19 @@ The footer is honest about cost: the analysis is deterministic code over Grafana
 
 Five or more hosts in one alert line are treated as one fleet-wide event (network, monitoring, or a shared
 dependency) instead of separate problems. Messages that only report recoveries get no reply.
+
+### Asking about a server
+
+Anyone who can talk to Fenix can ask about a server in plain words, for example *"what happened on web-01 in the
+last 5 minutes?"* or *"any timeouts on web-01 this hour?"*. Two read-only tools answer it:
+
+- **`host_logs`** reads the server's logs from Loki for the window asked (1–180 minutes, default 15). The name is
+  matched to Loki's `host` label ignoring case and dashes; an ambiguous name returns the candidates so Fenix can
+  ask which one. Up to the newest 500 lines are grouped (repeats counted, with first and last time) and passwords,
+  tokens and credentials in URLs are masked. Filters: `service`, `search` text, `problems_only`.
+- **`host_health`** adds the metrics and a verdict when the question is about the server being down or slow.
+
+A typical answer costs a few thousand tokens, since the model reads the grouped timeline, not raw logs.
 
 ## Usage tracking
 
