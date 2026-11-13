@@ -50,11 +50,12 @@ const oauthErrorDetail = (body) => (body?.error ? ` error=${logSafe(body.error)}
 const INSTRUCTIONS =
   'Fenix is the team DevOps assistant. Use these tools for CI builds and test failures (TeamCity), flaky tests, ' +
   'server health from Grafana metrics and logs, the GitLab codebase, YouTrack issues, Fenix usage, and the people ' +
-  'in Slack with their availability (slack_users). ' +
+  'in Slack with their availability (slack_users) and the channels Fenix can post in (slack_channels). ' +
   'All tools are read-only, except where noted.';
 const OWNER_INSTRUCTIONS =
   'slack_send_message posts as Fenix to a channel, a DM or a thread. Use it when the user asks to send, post or DM ' +
-  'something in Slack; write the finished message in Slack mrkdwn first. Before DMing someone, use slack_users to ' +
+  'something in Slack; write the finished message in Slack mrkdwn first. If a channel name is not found, check ' +
+  'slack_channels for the exact name before suggesting an invite. Before DMing someone, use slack_users to ' +
   'pick the right person and mention it to the user if they are away, on vacation or otherwise unavailable.';
 
 /**

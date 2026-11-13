@@ -2,6 +2,7 @@ import assert from 'node:assert';
 import { beforeEach, describe, it, mock } from 'node:test';
 
 import {
+  createSlackChannelsTool,
   createSlackDirectory,
   createSlackSendMessageTool,
   createSlackUsersTool,
@@ -19,11 +20,18 @@ function fakeSlack() {
     conversations: {
       list: mock.fn(async ({ cursor }) =>
         cursor
-          ? { channels: [{ id: 'C0NEWS', name: 'team-news' }] }
+          ? {
+              channels: [
+                { id: 'C0NEWS', name: 'team-news', is_member: true },
+                { id: 'G0SECRET', name: 'secret-team', is_private: true, is_member: true },
+              ],
+            }
           : { channels: [{ id: 'C0RANDOM', name: 'random' }], response_metadata: { next_cursor: 'page2' } },
       ),
     },
+    auth: { test: mock.fn(async () => ({ user_id: 'U0FENIXBOT', user: 'fenix_bot' })) },
     users: {
+      info: mock.fn(async () => ({ user: { name: 'fenix_bot', real_name: 'Fenix (dev)' } })),
       getPresence: mock.fn(async ({ user }) => ({ presence: user === 'U0SAM' ? 'active' : 'away' })),
       list: mock.fn(async () => ({
         members: [
@@ -91,7 +99,7 @@ describe('slack_send_message', () => {
     const msg = slack.chat.postMessage.mock.calls[0].arguments[0];
     assert.strictEqual(msg.channel, 'U0OWNER');
     assert.strictEqual(msg.text, '*Hello*');
-    assert.match(r.content[0].text, /^Sent to me\. https:\/\/acme\.slack\.com\//);
+    assert.match(r.content[0].text, /^Sent as "Fenix \(dev\)" \(@fenix_bot\) to me\. https:\/\/acme\.slack\.com\//);
   });
 
   it('finds a channel by name across pages and reuses the directory', async () => {
@@ -132,14 +140,18 @@ describe('slack_send_message', () => {
   it('reports unknown targets and explains Slack errors without throwing', async () => {
     const unknown = await send(slack, { to: '#nope', text: 'x' });
     assert.ok(unknown.isError);
-    assert.match(unknown.content[0].text, /No channel called "#nope"/);
+    assert.match(unknown.content[0].text, /No channel called "#nope"\. Fenix sees every public channel/);
+    assert.match(unknown.content[0].text, /is a private channel: invite Fenix with \/invite @fenix_bot/);
+
+    const typo = await send(slack, { to: '#team-new', text: 'x' });
+    assert.match(typo.content[0].text, /Did you mean #team-news\?/);
 
     slack.chat.postMessage = mock.fn(async () => {
       throw Object.assign(new Error('An API error occurred: not_in_channel'), { data: { error: 'not_in_channel' } });
     });
     const r = await send(slack, { to: 'G0PRIVATE1', text: 'x' });
     assert.ok(r.isError);
-    assert.match(r.content[0].text, /\/invite @Fenix/);
+    assert.match(r.content[0].text, /\/invite @fenix_bot \(the bot shown as "Fenix \(dev\)"\)/);
   });
 
   it('needs somewhere to post', async () => {
@@ -210,5 +222,25 @@ describe('slack_send_message and recipient status', () => {
     assert.match(r.content[0].text, /\nNote: Alex R has status :palm_tree: Vacation until Fri 20 Nov, 17:00\.$/);
     const quiet = await send(slack, { to: '#random', text: 'hi' });
     assert.ok(!quiet.content[0].text.includes('Note:'));
+  });
+});
+
+describe('slack_channels', () => {
+  /** @param {object} args */
+  const channels = (args) =>
+    createSlackChannelsTool(createSlackDirectory(/** @type {any} */ (fakeSlack()))).handler(args, {});
+
+  it('lists where Fenix can post, whether it needs an invite, and which bot it is', async () => {
+    const text = (await channels({})).content[0].text;
+    assert.match(text, /^3 channels:/);
+    assert.match(text, /• #random \(C0RANDOM\): public · Fenix can post without an invite/);
+    assert.match(text, /• #secret-team \(G0SECRET\): private · Fenix is a member/);
+    assert.match(text, /• #team-news \(C0NEWS\): public · Fenix is a member/);
+    assert.match(text, /Fenix posts as "Fenix \(dev\)" \(@fenix_bot\)/);
+  });
+
+  it('suggests close names when nothing matches', async () => {
+    const text = (await channels({ query: '#team-newz' })).content[0].text;
+    assert.match(text, /No channel matches "#team-newz"\. Did you mean #team-news\?/);
   });
 });

@@ -239,6 +239,9 @@ the Fenix server.
 - **Read-only by design:** `READ_ONLY_TOOLS` in `agent/tools/index.js` lists the static read-only tools (18). YouTrack
   create/update and Slack-bound tools are excluded, and every tool is marked `readOnlyHint`.
 - **Slack tools** (from `createSlackMcpTools()`, sharing one cached workspace directory):
+  - `slack_channels` (read-only, every connection): the channels Fenix can post in, with IDs: every public channel
+    (no invite needed, thanks to `chat:write.public`) and the private ones it is a member of. Misspelled names get
+    "did you mean" suggestions, and invite hints name the exact bot user.
   - `slack_users` (read-only, every connection): the people Fenix can message, with handle, user ID, title,
     active/away, custom status (vacation, sick, focus...) and when it clears, huddles, and local time.
   - `slack_send_message` (owner only: the static-token connection): posts as Fenix to `me` (a DM to the owner),

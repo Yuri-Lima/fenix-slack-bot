@@ -36,17 +36,53 @@ export function parseThreadRef(ref) {
 }
 
 /**
+ * Fenix's own Slack identity, so messages name the right bot (its display name may differ from "Fenix").
+ * @typedef {{ userId: string, handle: string, name: string }} BotIdentity
+ */
+
+/**
+ * How to invite Fenix, naming the exact bot user.
+ * @param {BotIdentity | null} bot
+ * @returns {string}
+ */
+export const inviteHint = (bot) => (bot ? `/invite @${bot.handle} (the bot shown as "${bot.name}")` : '/invite @Fenix');
+
+/** What Fenix can see and where it can post, for the model. */
+const CHANNEL_RULES =
+  'Fenix sees every public channel and can post in all of them without being invited; ' +
+  'private channels only show up once Fenix is a member.';
+
+/**
+ * Levenshtein distance, for suggesting channel names close to a mistyped one.
+ * @param {string} a
+ * @param {string} b
+ * @returns {number}
+ */
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+/**
  * Slack error codes explained for the model.
  * @param {string} code
  * @param {string} target
+ * @param {BotIdentity | null} bot
  * @returns {string}
  */
-function explainSlackError(code, target) {
+function explainSlackError(code, target, bot) {
   switch (code) {
     case 'not_in_channel':
-      return `Fenix is not a member of ${target}. Invite it there with /invite @Fenix, then try again.`;
+      return `${target} is private and Fenix is not a member. Invite it with ${inviteHint(bot)}, then try again.`;
     case 'channel_not_found':
-      return `Slack cannot find ${target}, or Fenix cannot see it (private channels need an invite).`;
+      return `Slack cannot find ${target}. ${CHANNEL_RULES} If it is private, invite Fenix with ${inviteHint(bot)}.`;
     case 'is_archived':
       return `${target} is archived.`;
     case 'thread_not_found':
@@ -57,10 +93,18 @@ function explainSlackError(code, target) {
 }
 
 /**
+ * A channel Fenix can see.
+ * @typedef {{ id: string, name: string, isPrivate: boolean, isMember: boolean }} ChannelInfo
+ */
+
+/**
  * @typedef {object} SlackDirectory
- * @property {(name: string) => Promise<string | undefined>} channelId - channel ID by name (without #)
+ * @property {() => Promise<ChannelInfo[]>} channels - every channel Fenix can see (public, plus private ones it is in)
+ * @property {(name: string) => Promise<ChannelInfo | undefined>} channelByName - by name, with or without #
+ * @property {(name: string) => Promise<string[]>} similarChannels - up to 3 names close to a mistyped one
  * @property {() => Promise<any[]>} members - active people in the workspace (no bots, no deactivated accounts)
  * @property {(name: string) => Promise<any[]>} findMembers - people whose handle, display or real name equals `name`
+ * @property {() => Promise<BotIdentity | null>} bot - Fenix's own Slack user
  */
 
 /**
@@ -70,15 +114,17 @@ function explainSlackError(code, target) {
  * @returns {SlackDirectory}
  */
 export function createSlackDirectory(client) {
-  /** @type {{ at: number, byName: Map<string, string> }} channel name -> ID */
-  const channels = { at: 0, byName: new Map() };
+  /** @type {{ at: number, list: ChannelInfo[] }} */
+  const channelCache = { at: 0, list: [] };
   /** @type {{ at: number, members: any[] }} */
   const people = { at: 0, members: [] };
+  /** @type {Promise<BotIdentity | null> | null} */
+  let botIdentity = null;
 
-  /** @param {string} name */
-  async function channelId(name) {
-    if (Date.now() - channels.at > DIRECTORY_TTL_MS) {
-      channels.byName = new Map();
+  async function channels() {
+    if (Date.now() - channelCache.at > DIRECTORY_TTL_MS) {
+      /** @type {ChannelInfo[]} */
+      const found = [];
       let cursor;
       do {
         const page = await client.conversations.list({
@@ -87,12 +133,49 @@ export function createSlackDirectory(client) {
           limit: 1000,
           cursor,
         });
-        for (const c of page.channels || []) if (c.name && c.id) channels.byName.set(c.name.toLowerCase(), c.id);
+        for (const c of page.channels || []) {
+          if (c.name && c.id)
+            found.push({ id: c.id, name: c.name, isPrivate: !!c.is_private, isMember: !!c.is_member });
+        }
         cursor = page.response_metadata?.next_cursor || undefined;
       } while (cursor);
-      channels.at = Date.now();
+      channelCache.list = found;
+      channelCache.at = Date.now();
     }
-    return channels.byName.get(name.toLowerCase());
+    return channelCache.list;
+  }
+
+  /** @param {string} name */
+  async function channelByName(name) {
+    const wanted = name.replace(/^#/, '').toLowerCase();
+    return (await channels()).find((c) => c.name.toLowerCase() === wanted);
+  }
+
+  /** @param {string} name */
+  async function similarChannels(name) {
+    const wanted = name.replace(/^#/, '').toLowerCase();
+    return (await channels())
+      .map((c) => ({ name: c.name, score: editDistance(wanted, c.name.toLowerCase()) }))
+      .filter(
+        (c) =>
+          c.score <= 2 || (wanted.length >= 3 && (c.name.includes(wanted) || wanted.includes(c.name.toLowerCase()))),
+      )
+      .sort((a, b) => a.score - b.score)
+      .slice(0, 3)
+      .map((c) => `#${c.name}`);
+  }
+
+  function bot() {
+    botIdentity ??= (async () => {
+      const auth = await client.auth.test();
+      const info = await client.users.info({ user: /** @type {string} */ (auth.user_id) });
+      const handle = info.user?.name || auth.user || 'fenix';
+      return { userId: /** @type {string} */ (auth.user_id), handle, name: info.user?.real_name || handle };
+    })().catch(() => {
+      botIdentity = null; // try again next time
+      return null;
+    });
+    return botIdentity;
   }
 
   async function members() {
@@ -119,7 +202,49 @@ export function createSlackDirectory(client) {
     );
   }
 
-  return { channelId, members, findMembers };
+  return { channels, channelByName, similarChannels, members, findMembers, bot };
+}
+
+/**
+ * Read-only tool listing the channels Fenix can post in, and whether it needs an invite.
+ * @param {SlackDirectory} directory
+ */
+export function createSlackChannelsTool(directory) {
+  return tool(
+    'slack_channels',
+    'List the Slack channels Fenix can post in: every public channel (no invite needed) and the private channels ' +
+      'it is a member of, with their IDs. Use it to find the exact channel name before posting, or to check whether ' +
+      'Fenix needs to be invited somewhere.',
+    {
+      query: z.string().optional().describe('Only channels whose name contains this text. Leave out to list all.'),
+    },
+    async ({ query }) => {
+      try {
+        const wanted = (query || '').trim().replace(/^#/, '').toLowerCase();
+        const list = (await directory.channels())
+          .filter((c) => !wanted || c.name.toLowerCase().includes(wanted))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        const bot = await directory.bot();
+        const footer =
+          `\n${CHANNEL_RULES} Fenix posts as "${bot?.name || 'Fenix'}"` +
+          `${bot ? ` (@${bot.handle})` : ''}. To post in another private channel, invite it with ${inviteHint(bot)}.`;
+        if (!list.length) {
+          const close = wanted ? await directory.similarChannels(wanted) : [];
+          const hint = close.length ? ` Did you mean ${close.join(', ')}?` : '';
+          return textResult(`No channel matches "${query}".${hint}${footer}`);
+        }
+        const lines = list.map((c) => {
+          const access = c.isPrivate
+            ? 'private · Fenix is a member'
+            : `public · ${c.isMember ? 'Fenix is a member' : 'Fenix can post without an invite'}`;
+          return `• #${c.name} (${c.id}): ${access}`;
+        });
+        return textResult(`${list.length} channel${list.length === 1 ? '' : 's'}:\n${lines.join('\n')}${footer}`);
+      } catch (e) {
+        return textResult(`Could not list Slack channels: ${e}`, true);
+      }
+    },
+  );
 }
 
 /** Most people slack_users looks up presence for (one Slack call each). */
@@ -232,7 +357,7 @@ export function describeStatus(member) {
  * @param {SlackDirectory} [directory] - shared with slack_users; a private one by default
  */
 export function createSlackSendMessageTool(client, directory = createSlackDirectory(client)) {
-  const { channelId, findMembers } = directory;
+  const { channelByName, similarChannels, findMembers } = directory;
 
   /**
    * Resolve where to post. Returns the Slack channel (a user ID posts to the DM with Fenix).
@@ -255,8 +380,15 @@ export function createSlackSendMessageTool(client, directory = createSlackDirect
       }
       return { error: `No workspace member is called "${value.slice(1)}". Use their Slack handle or user ID.` };
     }
-    const id = await channelId(value.replace(/^#/, ''));
-    return id ? { channel: id } : { error: `No channel called "${value}" that Fenix can see.` };
+    const found = await channelByName(value);
+    if (found) return { channel: found.id };
+    const close = await similarChannels(value);
+    const bot = await directory.bot();
+    return {
+      error:
+        `No channel called "${value}".${close.length ? ` Did you mean ${close.join(', ')}?` : ''} ${CHANNEL_RULES} ` +
+        `So unless the name is mistyped, "${value}" is a private channel: invite Fenix with ${inviteHint(bot)}.`,
+    };
   }
 
   return tool(
@@ -317,7 +449,9 @@ export function createSlackSendMessageTool(client, directory = createSlackDirect
           })
           .then((r) => r.permalink)
           .catch(() => null);
-        const sent = `Sent to ${where}${threadRef ? ' (in thread)' : ''}.${link ? ` ${link}` : ''}`;
+        const bot = await directory.bot();
+        const as = bot ? ` as "${bot.name}" (@${bot.handle})` : '';
+        const sent = `Sent${as} to ${where}${threadRef ? ' (in thread)' : ''}.${link ? ` ${link}` : ''}`;
         // For a DM, say if the person has a status (vacation, sick, focus...) so the user knows
         const person = /^[UW]/.test(/** @type {string} */ (channel))
           ? (await directory.members().catch(() => [])).find((m) => m.id === channel)
@@ -326,7 +460,8 @@ export function createSlackSendMessageTool(client, directory = createSlackDirect
         return textResult(status ? `${sent}\nNote: ${personName(person)} has ${status}.` : sent);
       } catch (e) {
         const code = /** @type {any} */ (e).data?.error;
-        return textResult(code ? explainSlackError(code, where) : `Could not send the message: ${e}`, true);
+        const bot = await directory.bot();
+        return textResult(code ? explainSlackError(code, where, bot) : `Could not send the message: ${e}`, true);
       }
     },
   );

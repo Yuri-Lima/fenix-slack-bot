@@ -1,7 +1,12 @@
 import { flakyTestsTool, flakyTrendsTool, testTimelineTool } from './flaky-tracker.js';
 import { listFilesTool, readFileTool, recentCommitsTool, searchCodeTool } from './gitlab.js';
 import { hostHealthTool } from './grafana.js';
-import { createSlackDirectory, createSlackSendMessageTool, createSlackUsersTool } from './slack.js';
+import {
+  createSlackChannelsTool,
+  createSlackDirectory,
+  createSlackSendMessageTool,
+  createSlackUsersTool,
+} from './slack.js';
 import {
   getBuildChangesTool,
   getBuildDetailsTool,
@@ -72,7 +77,7 @@ export const READ_ONLY_TOOLS = [
 export function createSlackMcpTools(client) {
   const directory = createSlackDirectory(client);
   return {
-    readOnly: [createSlackUsersTool(client, directory)],
+    readOnly: [createSlackChannelsTool(directory), createSlackUsersTool(client, directory)],
     owner: [createSlackSendMessageTool(client, directory)],
   };
 }
