@@ -24,6 +24,24 @@ function quotedSections(text) {
 }
 
 /**
+ * The draft's body: its text quoted, and the attached image named (Slack cannot preview it before it is posted).
+ * @param {import('../../mcp/send-approval.js').Draft} draft
+ * @returns {Block[]}
+ */
+function draftBody(draft) {
+  /** @type {Block[]} */
+  const blocks = draft.text ? quotedSections(draft.text) : [];
+  if (draft.image) {
+    const kb = Math.max(1, Math.round(draft.image.data.length / 1024));
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `:frame_with_picture: With image \`${draft.image.filename}\` (${kb} KB)` }],
+    });
+  }
+  return blocks;
+}
+
+/**
  * DM asking an owner to send or discard a message an MCP client drafted.
  * @param {import('../../mcp/send-approval.js').Draft} draft
  * @returns {Block[]}
@@ -37,7 +55,7 @@ export function buildSendApprovalBlocks(draft) {
         text: `:outbox_tray: *${draft.caller}* wants to post as Fenix to *${draft.target.where}*:`,
       },
     },
-    ...quotedSections(draft.text),
+    ...draftBody(draft),
     {
       type: 'context',
       elements: [
@@ -96,7 +114,7 @@ export function buildSendDecisionBlocks(draft, outcome, userId, result = '') {
         ? `:warning: <@${userId}> approved *${draft.caller}*'s message, but it could not be posted.`
         : `:wastebasket: <@${userId}> discarded *${draft.caller}*'s message to *${draft.target.where}*.`;
   /** @type {Block[]} */
-  const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: head } }, ...quotedSections(draft.text)];
+  const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: head } }, ...draftBody(draft)];
   if (result) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: result }] });
   return blocks;
 }

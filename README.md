@@ -245,7 +245,8 @@ the Fenix server.
   - `slack_users` (read-only, every connection): the people Fenix can message, with handle, user ID, title,
     active/away, custom status (vacation, sick, focus...) and when it clears, huddles, and local time.
   - `slack_send_message` (connections with the `send` scope; see *Other MCP clients*): posts as Fenix to `me` (a DM to the owner),
-    `#channel`, `@person`, a Slack ID, or a thread given by its message link, and returns the message link. For a DM
+    `#channel`, `@person`, a Slack ID, or a thread given by its message link, optionally with an uploaded image,
+    and returns the message link. For a DM
     it also notes the recipient's status. It is not marked read-only, so Claude Code asks before each send; clients
     registered with Slack approval only draft, and OAuth sign-ins from Claude app connectors never get it.
   Ask a session, for example: *"Write a short Slack message about today's failed builds and DM it to me."*
@@ -301,6 +302,20 @@ npm run -s vps:mcp-client -- revoke grok      # creating the same name again rot
 
 Clients with Slack approval get the draft in each owner's DM with **Send / Discard** buttons; the tool call returns
 straight away and says so. Drafts expire after 30 minutes and live in memory only.
+
+**Images.** `slack_send_message` can attach an image (PNG, JPEG, GIF or WebP, up to 10 MB), posted with the text as
+its caption in one message. The bytes never pass through the model: the client uploads them with one shell command
+and passes the returned `upload_id` as `image` (the tool description gives each connection its exact command):
+
+```sh
+curl -sS -X POST "https://<your-fenix-domain>/uploads?filename=banner.png" \
+  -H "Authorization: Bearer $(cat ~/.fenix_mcp_token)" --data-binary @banner.png
+# {"upload_id":"img_...","filename":"banner.png","bytes":503787,"expires_in":3600}
+```
+
+Only connections with the `send` scope can upload. An upload belongs to the client that made it, works once, is
+checked to be a real image by its first bytes, and expires after an hour (memory only). With Slack approval, the
+draft names the attached image and Fenix uploads it to Slack on **Send**.
 
 **Grok CLI** (`~/.grok/config.toml`; Grok reads the token file on every request):
 

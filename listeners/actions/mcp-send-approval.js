@@ -25,7 +25,7 @@ export async function handleMcpSendDecision({ ack, body, client, logger }) {
   let result = '';
   if (draft && action.action_id === SEND_ACTION) {
     directory ??= createSlackDirectory(client);
-    const posted = await deliverMessage(client, directory, draft.target, draft.text);
+    const posted = await deliverMessage(client, directory, draft.target, draft.text, draft.image);
     outcome = posted.isError ? 'failed' : 'sent';
     result = posted.content[0].text;
   }

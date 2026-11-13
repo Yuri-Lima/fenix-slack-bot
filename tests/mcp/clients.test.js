@@ -13,6 +13,7 @@ const { flushUsage, monthKey, readMonth } = await import('../../utils/usage-stor
 const { DISCARD_ACTION, SEND_ACTION } = await import('../../listeners/views/mcp-send-approval-builder.js');
 
 const OWNER = 'U0OWNER';
+const { PNG } = await import('../fixtures/png.js');
 
 describe('MCP client registry', () => {
   after(() => {
@@ -57,6 +58,13 @@ describe('MCP endpoint with named clients', () => {
       postMessage: mock.fn(async (/** @type {any} */ msg) => ({ ok: true, channel: msg.channel, ts: '1.000001' })),
       update: mock.fn(async () => ({ ok: true })),
       getPermalink: mock.fn(async () => ({ permalink: 'https://acme.slack.com/archives/D1/p1000001' })),
+    },
+    conversations: { open: mock.fn(async ({ users }) => ({ channel: { id: `D-${users}` } })) },
+    files: {
+      uploadV2: mock.fn(async () => ({
+        ok: true,
+        files: [{ files: [{ id: 'F1', permalink: 'https://acme.slack.com/files/U0BOT/F1/banner.png' }] }],
+      })),
     },
   };
   /** @type {Record<string, string>} */
@@ -192,6 +200,79 @@ describe('MCP endpoint with named clients', () => {
     );
     assert.strictEqual(discarded?.userName, 'srv-drafter');
     assert.deepStrictEqual(sent?.tools, {}, 'the decision does not count as a second tool call');
+  });
+
+  /** Upload bytes as a client; returns the parsed reply and status. */
+  const upload = async (/** @type {string} */ token, /** @type {Buffer} */ body, filename = 'banner.png') => {
+    const r = await fetch(`${base}/uploads?filename=${filename}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+      body,
+    });
+    return { status: r.status, body: await r.json() };
+  };
+
+  it('accepts image uploads only from connections that can send, and only real images', async () => {
+    const ok = await upload(tokens.sender, PNG);
+    assert.strictEqual(ok.status, 201);
+    assert.match(ok.body.upload_id, /^img_/);
+    assert.deepStrictEqual([ok.body.filename, ok.body.bytes, ok.body.expires_in], ['banner.png', PNG.length, 3600]);
+
+    assert.strictEqual((await upload(tokens.reader, PNG)).status, 403);
+    assert.strictEqual((await upload(tokens.sender, Buffer.from('not an image'))).status, 415);
+    const anon = await fetch(`${base}/uploads`, { method: 'POST', body: PNG });
+    assert.strictEqual(anon.status, 401);
+  });
+
+  it('posts an uploaded image with its caption in one message, and explains how to upload', async () => {
+    const client = await connect(tokens.sender);
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'slack_send_message');
+    assert.match(tool?.description || '', /curl -sS -X POST "https:\/\/fenix-mcp\.example\.com\/uploads/);
+    assert.match(tool?.description || '', /~\/\.fenix_mcp_token_srv-sender/);
+
+    const { body } = await upload(tokens.sender, PNG);
+    const r = await client.callTool({
+      name: 'slack_send_message',
+      arguments: { to: 'me', text: 'New banner', image: body.upload_id, image_alt: 'Fenix banner' },
+    });
+    assert.match(/** @type {any} */ (r.content)[0].text, /^Sent to me\. https:\/\/acme\.slack\.com\/files\//);
+    const args = slack.files.uploadV2.mock.calls.at(-1).arguments[0];
+    assert.deepStrictEqual(
+      [args.channel_id, args.initial_comment, args.filename, args.alt_text, args.file.length],
+      [`D-${OWNER}`, 'New banner', 'banner.png', 'Fenix banner', PNG.length],
+    );
+
+    const reused = await client.callTool({
+      name: 'slack_send_message',
+      arguments: { to: 'me', image: body.upload_id },
+    });
+    assert.ok(reused.isError, 'an upload is attached once');
+    await client.close();
+  });
+
+  it('carries an image through Slack approval and posts it on Send', async () => {
+    const drafter = await connect(tokens.drafter);
+    const sender = await connect(tokens.sender);
+    const { body } = await upload(tokens.drafter, PNG, 'chart.png');
+    // Another client cannot use this upload
+    const stolen = await sender.callTool({
+      name: 'slack_send_message',
+      arguments: { to: 'me', image: body.upload_id },
+    });
+    assert.ok(stolen.isError);
+
+    const uploadsBefore = slack.files.uploadV2.mock.callCount();
+    const r = await drafter.callTool({ name: 'slack_send_message', arguments: { to: 'me', image: body.upload_id } });
+    assert.match(/** @type {any} */ (r.content)[0].text, /^Not posted yet/);
+    assert.strictEqual(slack.files.uploadV2.mock.callCount(), uploadsBefore, 'nothing uploaded before approval');
+    const dm = slack.chat.postMessage.mock.calls.at(-1).arguments[0];
+    assert.match(JSON.stringify(dm.blocks), /With image `chart\.png`/);
+
+    await click(SEND_ACTION);
+    assert.strictEqual(slack.files.uploadV2.mock.callCount(), uploadsBefore + 1);
+    assert.strictEqual(slack.files.uploadV2.mock.calls.at(-1).arguments[0].filename, 'chart.png');
+    await drafter.close();
+    await sender.close();
   });
 
   it('rejects revoked tokens on the next request', async () => {

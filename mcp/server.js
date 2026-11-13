@@ -19,6 +19,7 @@ import {
   startAuthorization,
 } from './oauth.js';
 import { requestSendApproval } from './send-approval.js';
+import { MAX_UPLOAD_BYTES, storeUpload, takeUpload, UPLOAD_TTL_SEC } from './uploads.js';
 
 // MCP server for Claude Code: Fenix's read-only tools over Streamable HTTP, plus
 // owner-only tools (slack_send_message) for the static-token connection.
@@ -70,6 +71,21 @@ export function isAuthorized(header, token) {
   const expected = Buffer.from(`Bearer ${token}`);
   const given = Buffer.from(header || '');
   return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+/**
+ * The shell command a connection runs to upload an image (bytes never pass through the model).
+ * Token files follow the setup convention: ~/.fenix_mcp_token for Claude Code, ~/.fenix_mcp_token_<client> otherwise.
+ * @param {string} base - public origin of the endpoint
+ * @param {string} clientName
+ * @returns {string}
+ */
+export function uploadHint(base, clientName) {
+  const tokenFile = clientName === STATIC_CLIENT_NAME ? '~/.fenix_mcp_token' : `~/.fenix_mcp_token_${clientName}`;
+  return (
+    `curl -sS -X POST "${base}/uploads?filename=<name>.png" -H "Authorization: Bearer $(cat ${tokenFile})" ` +
+    '--data-binary @<path to image>   (PNG, JPEG, GIF or WebP up to 10 MB; replies {"upload_id": ...}, valid 1 hour)'
+  );
 }
 
 /**
@@ -152,18 +168,30 @@ const MAX_BODY_BYTES = 64 * 1024;
  * @returns {Promise<string>}
  */
 function readBody(req) {
+  return readBytes(req, MAX_BODY_BYTES).then((b) => b.toString('utf-8'));
+}
+
+/** Thrown when a request body is over its limit. */
+class BodyTooLarge extends Error {}
+
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {number} limit
+ * @returns {Promise<Buffer>}
+ */
+function readBytes(req, limit) {
   return new Promise((resolve, reject) => {
     let size = 0;
     /** @type {Buffer[]} */
     const chunks = [];
     req.on('data', (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error('body too large'));
+      if (size > limit) {
+        reject(new BodyTooLarge('body too large'));
         req.destroy();
       } else chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
@@ -244,6 +272,7 @@ export function startMcpServer(logger, slack) {
   const challenge = oauth ? `Bearer resource_metadata="${publicUrl}/.well-known/oauth-protected-resource"` : 'Bearer';
   // Created once so their Slack directory caches outlive a single stateless request
   const slackTools = slack ? createSlackMcpTools(slack) : null;
+  const uploadBase = publicUrl || `http://${host}:${port}`;
 
   const http = createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost');
@@ -311,6 +340,41 @@ export function startMcpServer(logger, slack) {
         }
       }
 
+      // Images for slack_send_message: the client uploads the bytes here, then passes the upload_id
+      if (pathname === '/uploads' && req.method === 'POST') {
+        const caller = identifyCaller(req.headers.authorization || '', token, oauth);
+        if (!caller) {
+          res.writeHead(401, { 'WWW-Authenticate': challenge }).end();
+          return;
+        }
+        detail = ` client=${caller.name}`;
+        if (!caller.scopes.includes('send')) {
+          sendJson(res, 403, { error: 'This connection cannot send messages, so it cannot upload images.' });
+          return;
+        }
+        /** @type {Buffer} */
+        let data;
+        try {
+          data = await readBytes(req, MAX_UPLOAD_BYTES);
+        } catch (e) {
+          if (!(e instanceof BodyTooLarge)) throw e;
+          sendJson(res, 413, { error: `Image too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB).` });
+          return;
+        }
+        const r = storeUpload(caller.name, data, url.searchParams.get('filename'));
+        if (!r.ok) {
+          sendJson(res, r.status, { error: r.error });
+          return;
+        }
+        sendJson(res, 201, {
+          upload_id: r.upload.id,
+          filename: r.upload.filename,
+          bytes: r.upload.data.length,
+          expires_in: UPLOAD_TTL_SEC,
+        });
+        return;
+      }
+
       if (pathname !== path) {
         res.writeHead(404).end();
         return;
@@ -327,12 +391,19 @@ export function startMcpServer(logger, slack) {
         return;
       }
       // Sending needs the `send` scope; clients with sendApproval "slack" only draft, an owner sends
-      const approve =
-        caller.sendApproval === 'slack'
-          ? (/** @type {any} */ target, /** @type {string} */ text) =>
-              requestSendApproval(slack, caller.name, target, text)
-          : undefined;
-      const owner = slackTools && caller.scopes.includes('send') ? [slackTools.send(approve)] : [];
+      const owner =
+        slackTools && caller.scopes.includes('send')
+          ? [
+              slackTools.send({
+                approve:
+                  caller.sendApproval === 'slack'
+                    ? (target, text, image) => requestSendApproval(slack, caller.name, target, text, image)
+                    : undefined,
+                takeImage: (id) => takeUpload(id, caller.name),
+                uploadHint: uploadHint(uploadBase, caller.name),
+              }),
+            ]
+          : [];
       const server = buildMcpServer({ readOnly: slackTools?.readOnly, owner, caller });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => {

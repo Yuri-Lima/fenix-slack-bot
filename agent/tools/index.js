@@ -69,17 +69,16 @@ export const READ_ONLY_TOOLS = [
 
 /**
  * Slack tools for the MCP server, sharing one cached workspace directory.
- * `readOnly` tools are served to every connection. `send(approve)` builds slack_send_message
- * for connections allowed to send (never OAuth sign-ins from Claude app connectors);
- * pass `approve` to hold each message for an owner's approval in Slack instead of posting it.
+ * `readOnly` tools are served to every connection. `send(options)` builds slack_send_message for a
+ * connection allowed to send (never OAuth sign-ins from Claude app connectors); its options say whether
+ * messages wait for an owner's approval in Slack and how the connection attaches uploaded images.
  * @param {import('@slack/web-api').WebClient} client
  */
 export function createSlackMcpTools(client) {
   const directory = createSlackDirectory(client);
-  const direct = createSlackSendMessageTool(client, directory);
   return {
     readOnly: [createSlackChannelsTool(directory), createSlackUsersTool(client, directory)],
-    /** @param {(target: import('./slack.js').SendTarget, text: string) => Promise<any>} [approve] */
-    send: (approve) => (approve ? createSlackSendMessageTool(client, directory, { approve }) : direct),
+    /** @param {import('./slack.js').SendToolOptions} [options] */
+    send: (options) => createSlackSendMessageTool(client, directory, options),
   };
 }

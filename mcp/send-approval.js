@@ -20,6 +20,7 @@ const MAX_DRAFTS = 20;
  * @property {string} caller - MCP client name
  * @property {import('../agent/tools/slack.js').SendTarget} target
  * @property {string} text
+ * @property {import('../agent/tools/slack.js').SendImage} [image]
  * @property {number} expiresAt - epoch seconds
  */
 
@@ -38,9 +39,10 @@ function pruneExpired() {
  * @param {string} caller - MCP client name, shown to the approver
  * @param {import('../agent/tools/slack.js').SendTarget} target
  * @param {string} text
+ * @param {import('../agent/tools/slack.js').SendImage} [image]
  * @returns {Promise<ReturnType<typeof textResult>>} what the client is told
  */
-export async function requestSendApproval(slack, caller, target, text) {
+export async function requestSendApproval(slack, caller, target, text, image) {
   pruneExpired();
   if (drafts.size >= MAX_DRAFTS) {
     return textResult('Not sent: too many messages are already waiting for approval in Slack.', true);
@@ -51,6 +53,7 @@ export async function requestSendApproval(slack, caller, target, text) {
     caller,
     target,
     text,
+    image,
     expiresAt: nowSec() + DRAFT_TTL_SEC,
   };
   drafts.set(draft.id, draft);
