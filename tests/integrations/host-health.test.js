@@ -145,6 +145,52 @@ describe('diagnose', () => {
     assert.match(verdictOf('health', e), /Phoenix checks failing: `database` went down and are still down/);
   });
 
+  it('names a full database pool as the cause of failed or recovered checks', () => {
+    const poolLogs = {
+      byService: {},
+      errorCount: 8,
+      topErrors: [
+        {
+          pattern: 'x',
+          sample: 'Health Check has failed! {"database":{"status":"down","message":"Connection pool exhausted"}}',
+          count: 8,
+          service: 'phoenix-system',
+        },
+      ],
+    };
+    const recovered = diagnose(
+      'health',
+      base({ healthChecks: [{ check: 'database', now: 1, minInWindow: 0 }], logs: poolLogs }),
+    );
+    assert.strictEqual(recovered.status, 'watch');
+    assert.strictEqual(recovered.title, 'Database connection pool was full, recovered');
+    assert.match(recovered.detail, /Likely cause: phoenix-system logged 8× "pool exhausted" at the same time\./);
+    assert.match(recovered.nextStep, /^It recovered on its own\. If it repeats, look for long-running queries/);
+
+    const failing = diagnose(
+      'health',
+      base({ healthChecks: [{ check: 'database', now: 0, minInWindow: 0 }], logs: poolLogs }),
+    );
+    assert.strictEqual(failing.status, 'action');
+    assert.strictEqual(failing.title, 'Database connection pool full');
+    assert.match(failing.nextStep, /^First look for long-running queries .* restart phoenix-app\./);
+  });
+
+  it('names other waiting errors without calling them a pool problem', () => {
+    const e = base({
+      healthChecks: [{ check: 'database', now: 1, minInWindow: 0 }],
+      logs: {
+        byService: {},
+        errorCount: 2,
+        topErrors: [{ pattern: 'x', sample: 'upstream timed out (110)', count: 2, service: 'phx-app' }],
+      },
+    });
+    const v = diagnose('health', e);
+    assert.strictEqual(v.title, 'Phoenix checks recovered');
+    assert.match(v.detail, /Likely cause: phx-app logged 2× "timed out"/);
+    assert.match(v.nextStep, /Start from the "timed out" errors below/);
+  });
+
   it('flags growing swap as real memory pressure', () => {
     const e = base({ memUsedPctMax: 95, swap: { startMb: 100, endMb: 900 } });
     assert.match(verdictOf('memory', e), /Running out of memory: .*Swap is growing/);

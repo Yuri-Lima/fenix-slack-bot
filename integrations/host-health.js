@@ -429,16 +429,25 @@ export function notableKinds(e) {
   return kinds;
 }
 
+/** Where to look when Phoenix's database connection pool is full. */
+const POOL_FULL_CHECK = 'look for long-running queries or locks in Postgres (pg_stat_activity)';
+
 /**
- * The most frequent logged error that shows something waiting (pool exhausted, timeout, ...).
- * Matches the full sample, since a pattern can be cut before the cause.
+ * The most frequent logged error that shows something waiting (pool exhausted, timeout, ...),
+ * with the sentence every verdict uses for it. Matches the full sample, since a pattern can be
+ * cut before the cause.
  * @param {HostEvidence} e
- * @returns {{ waitingOn: { pattern: string, sample: string, count: number, service: string }, cause: string } | null}
+ * @returns {{ cause: string, poolFull: boolean, because: string } | null}
  */
 function waitCause(e) {
   const waitingOn = e.logs?.topErrors.find((t) => WAIT_CAUSE_RE.test(t.sample));
   const cause = waitingOn && WAIT_CAUSE_RE.exec(waitingOn.sample)?.[0].toLowerCase();
-  return waitingOn && cause ? { waitingOn, cause } : null;
+  if (!waitingOn || !cause) return null;
+  return {
+    cause,
+    poolFull: cause === 'pool exhausted',
+    because: `${waitingOn.service} logged ${waitingOn.count}× "${cause}" at the same time`,
+  };
 }
 
 /**
@@ -488,17 +497,15 @@ export function diagnose(kind, e) {
       };
     }
     if (busy < 0.5) {
-      const { waitingOn, cause } = waitCause(e) ?? {};
+      const wait = waitCause(e);
       return {
         status: 'false-alarm',
         title: 'Not real CPU pressure',
         detail: `${load}, but the CPU was ${pct(e.cpu.idle)} idle. Tasks were waiting, not computing${
-          waitingOn
-            ? `; ${waitingOn.service} logged ${waitingOn.count}× "${cause}" at the same time, the likely reason`
-            : ''
+          wait ? `; ${wait.because}, the likely reason` : ''
         }.`,
-        nextStep: waitingOn
-          ? `Look into the "${cause}" errors below. The rule itself would be quieter if it measured CPU use instead of load average.`
+        nextStep: wait
+          ? `Look into the "${wait.cause}" errors below. The rule itself would be quieter if it measured CPU use instead of load average.`
           : 'Change the rule to measure CPU use instead of load average; that removes this false alarm.',
       };
     }
@@ -546,13 +553,12 @@ export function diagnose(kind, e) {
     // The exporter asks Phoenix for its health; when Phoenix hangs, the exporter times out with it
     const wait = waitCause(e);
     if (wait) {
-      const poolFull = wait.cause === 'pool exhausted';
       return {
         status: 'action',
-        title: poolFull ? 'Database connection pool full, server is up' : 'Phoenix not answering, server is up',
-        detail: `Host metrics from ${e.host} still arrive, but Phoenix stopped answering health checks; ${wait.waitingOn.service} logged ${wait.waitingOn.count}× "${wait.cause}" at the same time.`,
-        nextStep: poolFull
-          ? 'Look for long-running queries or locks in Postgres (pg_stat_activity). If it does not recover, restart phoenix-app.'
+        title: wait.poolFull ? 'Database connection pool full, server is up' : 'Phoenix not answering, server is up',
+        detail: `Host metrics from ${e.host} still arrive, but Phoenix stopped answering health checks; ${wait.because}.`,
+        nextStep: wait.poolFull
+          ? `First ${POOL_FULL_CHECK}. If it does not recover, restart phoenix-app.`
           : `Look into the "${wait.cause}" errors below before restarting the health exporter; it only reports what Phoenix answers.`,
       };
     }
@@ -569,19 +575,29 @@ export function diagnose(kind, e) {
     if (down.length) {
       const stillDown = down.filter((c) => c.now === 0);
       const names = down.map((c) => `\`${c.check}\``).join(', ');
+      const wait = waitCause(e);
+      const poolTitle = stillDown.length
+        ? 'Database connection pool full'
+        : 'Database connection pool was full, recovered';
       return {
         status: stillDown.length ? 'action' : 'watch',
-        title: stillDown.length ? 'Phoenix checks failing' : 'Phoenix checks recovered',
+        title: wait?.poolFull ? poolTitle : stillDown.length ? 'Phoenix checks failing' : 'Phoenix checks recovered',
         detail: `${names} went down${
           stillDown.length
             ? stillDown.length === down.length
               ? ' and are still down'
               : `; still down: ${stillDown.map((c) => `\`${c.check}\``).join(', ')}`
             : ' and recovered'
-        }. The server itself is up.`,
-        nextStep: e.logs?.topErrors.length
-          ? 'Start from the most frequent error below.'
-          : "Check the failing service's container on the server.",
+        }. The server itself is up.${wait ? ` Likely cause: ${wait.because}.` : ''}`,
+        nextStep: wait?.poolFull
+          ? stillDown.length
+            ? `First ${POOL_FULL_CHECK}. If it does not recover, restart phoenix-app.`
+            : `It recovered on its own. If it repeats, ${POOL_FULL_CHECK} around the alert time.`
+          : wait
+            ? `Start from the "${wait.cause}" errors below.`
+            : e.logs?.topErrors.length
+              ? 'Start from the most frequent error below.'
+              : "Check the failing service's container on the server.",
       };
     }
     return {
