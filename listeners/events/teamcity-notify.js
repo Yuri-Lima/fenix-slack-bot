@@ -797,7 +797,9 @@ export function formatAnalysis({
       }
       const infraCommits = commits.filter(hasFiles);
       if (infraCommits.length > 0) {
-        lines.push(`  _${infraCommits.length} commit${infraCommits.length > 1 ? 's' : ''} in this build, not analyzed for blame._`);
+        lines.push(
+          `  _${infraCommits.length} commit${infraCommits.length > 1 ? 's' : ''} in this build, not analyzed for blame._`,
+        );
       }
       return lines.join('\n');
     }

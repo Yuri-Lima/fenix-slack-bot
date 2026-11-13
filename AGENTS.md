@@ -22,6 +22,7 @@ npm start
 | `SLACK_APP_TOKEN` | App-level token (`xapp-`) for Socket Mode |
 | `TEAMCITY_TOKEN` | TeamCity access token (or `~/.teamcity_token`) |
 | `GITLAB_TOKEN` | GitLab read token (or `~/.gitlab_token`) |
+| `GRAFANA_TOKEN` | Grafana Viewer service-account token (or `~/.grafana_token`) |
 | `YOUTRACK_API_TOKEN` | YouTrack permanent token (or `~/.youtrack_token`) |
 | `SLACK_USER_TOKEN` | Optional user token (`xoxp-`) for the YouTrack shortcut's DM context (or `~/.slack_user_token`) |
 | `FENIX_CONFIG` | Path to the config file (default `fenix.config.json`) |
@@ -90,7 +91,7 @@ The store uses a `Map` keyed by `${channelId}:${threadTs}` with TTL-based cleanu
 
 ### Integrations
 
-`integrations/` is the single home of external API access: `http.js` (shared timeout, `requireConfigured`, uniform `<Service> API error (HTTP n)`), `teamcity.js` (client, request limiter, `locatorValue`, `buildUrl`, change helpers), `test-history.js` (TeamCity pass/fail history, flaky thresholds, classification, infra-kill detection via `isInfraKill`), `youtrack.js` (client, attachment upload, issue URL, custom-field builders, issue types/priorities), and `gitlab.js` (client, blocked-path list). Agent tools in `agent/tools/` and Slack listeners import from here; never call these services with `fetch` directly or create a second token reader. Slack user names resolve through `utils/slack.js`.
+`integrations/` is the single home of external API access: `http.js` (shared timeout, `requireConfigured`, uniform `<Service> API error (HTTP n)`), `teamcity.js` (client, request limiter, `locatorValue`, `buildUrl`, change helpers), `test-history.js` (TeamCity pass/fail history, flaky thresholds, classification, infra-kill detection via `isInfraKill`), `youtrack.js` (client, attachment upload, issue URL, custom-field builders, issue types/priorities), `gitlab.js` (client, blocked-path list), `grafana.js` (read-only Prometheus/Loki queries through Grafana's data source proxy), and `host-health.js` (evidence about a host around an alert and the pure `diagnose()` verdicts). Agent tools in `agent/tools/` and Slack listeners import from here; never call these services with `fetch` directly or create a second token reader. Slack user names resolve through `utils/slack.js`.
 
 Tool handlers return `textResult(message, true)` from every `catch`, so the agent sees failures as errors.
 

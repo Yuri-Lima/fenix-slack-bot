@@ -17,5 +17,12 @@
     "project": "DEV"
   },
   "contextFile": "tests/fixtures/no-context.md",
-  "dataDir": "tests/.data"
+  "dataDir": "tests/.data",
+  "grafana": {
+    "url": "https://grafana.example.com",
+    "botId": "B0GRAFANA",
+    "prometheusUid": "prom",
+    "lokiUid": "loki",
+    "replyMode": "thread"
+  }
 }

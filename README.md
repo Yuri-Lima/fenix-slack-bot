@@ -37,6 +37,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | | Capability | What it does |
 |---|---|---|
 | 🔴 | **Automatic build-failure analysis** | Watches TeamCity notifications in Slack and replies in-thread with new vs. pre-existing failures, flaky tests, the real error behind Cypress/Docker boilerplate, and a ranked list of likely-culprit commits. Workers SIGKILLed by the host (OOM) are reported as infrastructure, not blamed on commits. |
+| 📈 | **Grafana alert analysis** | Explains each Grafana alert from real metrics and logs: whether load was real CPU pressure or waiting tasks, which Phoenix checks failed, whether the machine is unreachable, which errors coincided, how often it repeats, and what to do next. Fleet-wide alerts are reported as one central cause. |
 | ♻️ | **Flaky-test tracker** | Answers "what's flaky?", "what got worse this week?", and "when did this test start failing?" from TeamCity's test history. |
 | 🎫 | **YouTrack assistant** | Search, read, create, and update issues in natural language, with explicit confirmation before any write. |
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
@@ -52,6 +53,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | **Direct message** | Just write | Fenix answers in a thread and keeps context across follow-ups. |
 | **Channels and threads** | `@Fenix <question>` | Fenix replies **only when mentioned**, including inside threads it already joined. A mention resumes that thread's conversation. |
 | **TeamCity notifications** | Nothing; automatic | Failed-build messages from the TeamCity app get an analysis reply, no mention needed. |
+| **Grafana alerts** | Nothing; automatic | Each firing alert from the Grafana app gets an analysis: in the alert's thread (`grafana.replyMode: "thread"`) or as a preview in the admin DM (`"dm"`). |
 | **App Home** | Open the Home tab | A summary of what Fenix can do and how to reach it. |
 | **Assistant panel** | *Add Agent → Fenix* | Suggested prompts for builds, flaky tests, and tickets. |
 | **Message shortcut** | ⋯ → *Create YouTrack Ticket* | Opens a ticket form pre-filled from the message. |
@@ -164,6 +166,39 @@ How it gets there:
    reports it as infrastructure ("worker SIGKILLed, check agent memory, `journalctl -k` on the agent"), ranks no
    commit authors for it, and keeps it out of the failure log.
 
+## Grafana alert analysis
+
+When the Grafana Slack app posts a firing alert, Fenix reads everything it needs from the message itself: the
+rule, each host with its exact start time (from the 🔍 logs link) and its labels (from the silence link). For each
+firing host (up to three per message) it then pulls, read-only through a Grafana Viewer token:
+
+- **Reachability:** when node_exporter last delivered a sample, and whether the Phoenix health exporter answers.
+- **CPU and load:** load average against real CPU use by mode (user, system, disk wait, steal), processes running
+  and blocked. A load spike with an idle CPU is called out as waiting tasks, not CPU pressure.
+- **Memory, swap, disk:** peak memory use, swap growth, disk busy time, filesystem fill level and growth per day.
+- **Phoenix health checks:** which `phoenix_*_from_py` checks dropped during the alert.
+- **Logs (Loki):** volume per service and the most frequent error patterns, with errors that explain waiting tasks
+  (pool exhausted, timeouts, connection resets) linked to the verdict.
+- **Recurrence:** how often the same rule fired for the host in the last 24 hours and 7 days.
+
+The reply leads with a one-line verdict and ends with a next step:
+
+```text
+🔍 High System Load Over All CPU Cores Together
+
+app-01 · since 23:42 · 4th time in 24 h, 12× in 7 days
+Not real CPU pressure: load reached 12.6 on 2 CPUs (629%), but the CPU was 86% idle, with no disk
+wait and no steal. The load average was inflated by tasks waiting without using CPU or disk.
+• CPU (2 cores): user 9% · system 4% · disk wait 0% · steal 0% · idle 86%
+• Load: peak 12.6 at 23:32 · processes up to 10 running, 0 blocked
+• Memory: up to 67% used · swap 213 → 212 MB · disk busy up to 0%
+• Logs: 12,548 lines (phoenix-worker 12,286, …) · 25 error lines
+Next step: Alerting on CPU utilisation instead of load average would remove this false alarm.
+```
+
+Five or more hosts in one alert line are treated as one fleet-wide event (network, monitoring, or a shared
+dependency) instead of separate problems. Messages that only report recoveries get no reply.
+
 ## Architecture
 
 ```mermaid
@@ -196,7 +231,7 @@ flowchart LR
 | **Transport** | Bolt for JavaScript in Socket Mode; no public HTTP endpoint required. |
 | **Agent** | `query()` from the Claude Agent SDK with a generated system prompt, `maxTurns: 15`, and a 120 s timeout. At most 3 agent runs execute concurrently, and one per thread. |
 | **Tools** | Defined with `tool()` and Zod schemas, served by an in-process MCP server (`createSdkMcpServer`). Slack-bound tools are closures over the current channel and thread. |
-| **Integrations** | `integrations/` holds the only TeamCity, YouTrack, and GitLab clients (shared timeout and error format; TeamCity calls go through one limiter of 4 concurrent requests, at most 100 queued for up to 60 s). Agent tools and Slack listeners both import from it. |
+| **Integrations** | `integrations/` holds the only TeamCity, YouTrack, GitLab, and Grafana clients (shared timeout and error format; TeamCity calls go through one limiter of 4 concurrent requests, at most 100 queued for up to 60 s). Agent tools and Slack listeners both import from it. |
 | **Conversation state** | Only SDK session IDs are stored, keyed by `channel:thread_ts` (24 h TTL, 1,000 entries). Each mention or DM resumes its thread's session. |
 | **Persistence** | JSON files under `data/`: feedback (last 500 entries) and a per-configuration failure log. |
 
@@ -215,11 +250,12 @@ so the source stays generic.
 | `TEAMCITY_TOKEN` | For CI features | TeamCity access token. |
 | `YOUTRACK_API_TOKEN` | For YouTrack features | YouTrack permanent token. |
 | `GITLAB_TOKEN` | For codebase features | GitLab token with `read_api`. |
+| `GRAFANA_TOKEN` | For Grafana alert analysis | Grafana service-account token with the **Viewer** role. |
 | `SLACK_USER_TOKEN` | Optional | User token (`xoxp-…`) so the ticket shortcut can read DM context. |
 | `FENIX_CONFIG` | Optional | Path to the config file (default `fenix.config.json`). |
 
 Every integration token can also be read from a dotfile in `$HOME` (`~/.teamcity_token`, `~/.youtrack_token`,
-`~/.gitlab_token`, `~/.slack_user_token`) when the variable is not set.
+`~/.gitlab_token`, `~/.grafana_token`, `~/.slack_user_token`) when the variable is not set.
 
 ### 2. Deployment settings (`fenix.config.json`)
 
@@ -238,6 +274,10 @@ cp fenix.config.example.json fenix.config.json
 | `gitlab.url` / `gitlab.project` | GitLab base URL and project path (`group/repo`) for the codebase tools. |
 | `gitlab.defaultBranch` | Branch the codebase tools use when none is given (default `main`). |
 | `youtrack.url` / `youtrack.project` | YouTrack base URL and default project key. |
+| `grafana.url` / `grafana.botId` | Grafana base URL and the Slack bot ID of the Grafana app, whose alert posts trigger the analysis. |
+| `grafana.prometheusUid` / `grafana.lokiUid` | Data source UIDs for metrics and logs. |
+| `grafana.replyMode` | `dm` (default) sends analyses to `adminDmChannel` as a preview, `thread` replies under the alert, `off` disables it. |
+| `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |
 | `dataDir` | Directory for persisted state: feedback and the failure log (default `data`). |
 

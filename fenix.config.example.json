@@ -1,6 +1,8 @@
 {
   "teamName": "the Acme platform team",
-  "ownerIds": ["U0123456789"],
+  "ownerIds": [
+    "U0123456789"
+  ],
   "ownerName": "Jane",
   "adminDmChannel": "D0123456789",
   "teamcity": {
@@ -25,5 +27,13 @@
   "youtrack": {
     "url": "https://acme.youtrack.cloud",
     "project": "DEV"
-  }
+  },
+  "grafana": {
+    "url": "https://grafana.example.com",
+    "botId": "B0123456789",
+    "prometheusUid": "prometheus",
+    "lokiUid": "loki",
+    "replyMode": "dm"
+  },
+  "timeZone": "Europe/Berlin"
 }

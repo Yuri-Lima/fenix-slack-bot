@@ -315,10 +315,7 @@ describe('classifyBuildInfraFailure', () => {
   });
 
   it('classifies OOM markers in the statusText alone', () => {
-    assert.deepEqual(
-      classifyBuildInfraFailure('error message: cannot allocate memory', []),
-      { kind: 'oom-build' },
-    );
+    assert.deepEqual(classifyBuildInfraFailure('error message: cannot allocate memory', []), { kind: 'oom-build' });
     assert.deepEqual(
       classifyBuildInfraFailure('kernel: Memory cgroup out of memory: Killed process 1484 (buildkitd)', []),
       { kind: 'oom-build' },
@@ -326,10 +323,9 @@ describe('classifyBuildInfraFailure', () => {
   });
 
   it('classifies a dead Infra Up step without OOM markers as infra-step', () => {
-    assert.deepEqual(
-      classifyBuildInfraFailure('Tests passed: 361; exit code 1 (Step: Infra Up (Command Line))', []),
-      { kind: 'infra-step' },
-    );
+    assert.deepEqual(classifyBuildInfraFailure('Tests passed: 361; exit code 1 (Step: Infra Up (Command Line))', []), {
+      kind: 'infra-step',
+    });
   });
 
   it('does not classify ordinary failures as infra', () => {
@@ -363,7 +359,11 @@ describe('formatAnalysis build-level infra failure', () => {
       statistics: { property: [] },
     },
     failures: { testOccurrence: [] },
-    changes: { change: [commit('aaaaaaa', 'alice.example', 'Invoice validation', ['packages/api/src/invoice/invoice.service.ts'])] },
+    changes: {
+      change: [
+        commit('aaaaaaa', 'alice.example', 'Invoice validation', ['packages/api/src/invoice/invoice.service.ts']),
+      ],
+    },
     flakyMap: new Map(),
     historicalFileFreq: new Map(),
     buildLogErrors: [],

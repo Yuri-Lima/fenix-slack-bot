@@ -19,7 +19,10 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {{ url: string | null, botId: string | null, keyConfigs: BuildConfigHint[] }} teamcity
  * @property {{ url: string | null, project: string | null, defaultBranch: string }} gitlab
  * @property {{ url: string | null, project: string }} youtrack
+ * @property {{ url: string | null, botId: string | null, prometheusUid: string | null, lokiUid: string | null, replyMode: 'dm' | 'thread' | 'off' }} grafana
+ *   Grafana alert analysis. replyMode 'dm' sends analyses to adminDmChannel (preview), 'thread' replies under the alert.
  * @property {string} contextFile - Markdown appended to the system prompt (team-specific knowledge)
+ * @property {string} timeZone - IANA time zone for times shown in Slack (alerts use it too)
  * @property {string} dataDir - Directory for persisted state (feedback, failure log), relative to the project root
  */
 
@@ -32,8 +35,10 @@ const DEFAULTS = {
   teamcity: { url: null, botId: null, keyConfigs: [] },
   gitlab: { url: null, project: null, defaultBranch: 'main' },
   youtrack: { url: null, project: 'DEV' },
+  grafana: { url: null, botId: null, prometheusUid: null, lokiUid: null, replyMode: 'dm' },
   contextFile: 'prompts/context.local.md',
   dataDir: 'data',
+  timeZone: 'UTC',
 };
 
 /**
@@ -51,6 +56,7 @@ function loadConfig() {
     teamcity: { ...DEFAULTS.teamcity, ...file.teamcity },
     gitlab: { ...DEFAULTS.gitlab, ...file.gitlab },
     youtrack: { ...DEFAULTS.youtrack, ...file.youtrack },
+    grafana: { ...DEFAULTS.grafana, ...file.grafana },
   };
 }
 
