@@ -22,7 +22,7 @@ mock.module('@anthropic-ai/claude-agent-sdk', {
   },
 });
 
-const { AGENT_TIMEOUT_MESSAGE, THREAD_BUSY_MESSAGE, runFenixAgent, usageFromResult } = await import(
+const { AGENT_TIMEOUT_MESSAGE, THREAD_BUSY_MESSAGE, buildPrompt, runFenixAgent, usageFromResult } = await import(
   '../../agent/fenix.js'
 );
 
@@ -111,5 +111,24 @@ describe('usageFromResult', () => {
       turns: 4,
       durationMs: 9100,
     });
+  });
+});
+
+describe('buildPrompt', () => {
+  const now = Date.parse('2026-11-17T17:05:00Z') / 1000;
+
+  it('stamps the send time (test zone UTC) on a plain-text prompt', () => {
+    assert.strictEqual(buildPrompt('what happened?', [], now), '[Sent Tue, 17 Nov 2026, 17:05 UTC]\nwhat happened?');
+  });
+
+  it('sends images first, then the stamped text, as one user message', async () => {
+    const prompt = buildPrompt('see this', [{ name: 'a.png', mediaType: 'image/png', data: 'AAAA' }], now);
+    assert.notStrictEqual(typeof prompt, 'string');
+    const messages = [];
+    for await (const m of /** @type {AsyncIterable<any>} */ (prompt)) messages.push(m);
+    assert.strictEqual(messages.length, 1);
+    const [image, text] = messages[0].message.content;
+    assert.deepStrictEqual(image, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } });
+    assert.deepStrictEqual(text, { type: 'text', text: '[Sent Tue, 17 Nov 2026, 17:05 UTC]\nsee this' });
   });
 });

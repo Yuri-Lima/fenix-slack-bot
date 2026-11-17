@@ -11,3 +11,13 @@ describe('Grafana tools with excluded hosts (grafana.ignoreHosts: ["test"])', ()
     }
   });
 });
+
+describe('Grafana tools with a past window', () => {
+  it('reject an end time they cannot read, before any Grafana call', async () => {
+    for (const t of [hostLogsTool, hostHealthTool]) {
+      const r = await t.handler({ host: 'alpha', end: 'yesterday at noon' }, {});
+      assert.ok(r.isError);
+      assert.match(r.content[0].text, /is not a time like "2026-11-16 11:25" \(UTC\)/);
+    }
+  });
+});

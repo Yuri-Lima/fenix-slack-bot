@@ -38,7 +38,8 @@ for this and assign it to me"* get answered in the thread where they were asked.
 |---|---|---|
 | 🔴 | **Automatic build-failure analysis** | Watches TeamCity notifications in Slack and replies in-thread with new vs. pre-existing failures, flaky tests, the real error behind Cypress/Docker boilerplate, and a ranked list of likely-culprit commits. Workers SIGKILLed by the host (OOM) are reported as infrastructure, not blamed on commits. |
 | 📈 | **Grafana alert analysis** | Explains each Grafana alert from real metrics and logs: whether load was real CPU pressure or waiting tasks, which Phoenix checks failed, whether the machine is unreachable, which errors coincided, how often it repeats, and what to do next. Fleet-wide alerts are reported as one central cause. |
-| 🪵 | **Server logs on request** | Ask "what happened on web-01 in the last 5 minutes?" and Fenix reads that server's logs from Grafana Loki (read-only), resolves the name you typed, groups repeated lines into a timeline with secrets masked, and answers your question instead of pasting logs. |
+| 🪵 | **Server logs on request** | Ask "what happened on web-01 in the last 5 minutes?" (or yesterday at 11:10) and Fenix reads that server's logs from Grafana Loki (read-only), resolves the name you typed, groups repeated lines into a timeline with secrets masked, and answers your question instead of pasting logs. |
+| 🖼️ | **Reads screenshots** | Attach a screenshot to a DM or mention (an error dialog, a Grafana panel, a table of timestamps) and Fenix reads it with your question, then checks the servers or code it points to. |
 | ♻️ | **Flaky-test tracker** | Answers "what's flaky?", "what got worse this week?", and "when did this test start failing?" from TeamCity's test history. |
 | 🎫 | **YouTrack assistant** | Search, read, create, and update issues in natural language, with explicit confirmation before any write. |
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
@@ -212,13 +213,19 @@ dependency) instead of separate problems. Messages that only report recoveries g
 ### Asking about a server
 
 Anyone who can talk to Fenix can ask about a server in plain words, for example *"what happened on web-01 in the
-last 5 minutes?"* or *"any timeouts on web-01 this hour?"*. Two read-only tools answer it:
+last 5 minutes?"*, *"any timeouts on web-01 this hour?"* or *"what happened on web-01 yesterday at 11:10?"*. Two
+read-only tools answer it, both for now or a past moment (`end`, a local time in `timeZone`; each message is
+stamped with its send time so "yesterday" resolves):
 
 - **`host_logs`** reads the server's logs from Loki for the window asked (1–180 minutes, default 15). The name is
   matched to Loki's `host` label ignoring case and dashes; an ambiguous name returns the candidates so Fenix can
   ask which one. Up to the newest 500 lines are grouped (repeats counted, with first and last time) and passwords,
   tokens and credentials in URLs are masked. Filters: `service`, `search` text, `problems_only`.
 - **`host_health`** adds the metrics and a verdict when the question is about the server being down or slow.
+
+Screenshots attached to a DM or a mention are read as images (PNG, JPEG, GIF, WebP; up to 4 per message, 5 MB
+each, type checked from the bytes; downloaded with the `files:read` scope), so *"what happened here?"* with a
+screenshot of an error works. Other attachments are named back as not readable.
 
 A typical answer costs a few thousand tokens, since the model reads the grouped timeline, not raw logs.
 
@@ -431,7 +438,8 @@ cp fenix.config.example.json fenix.config.json
 | Key | Description |
 |---|---|
 | `teamName` | Team Fenix serves, used in its system prompt. |
-| `ownerIds` | Slack user IDs allowed to use Fenix. Everyone else gets a friendly "not ready yet" reply. |
+| `ownerIds` | Slack user IDs of the owners: full access, admin tools (feedback, usage, excluded servers), `report`, `delete`, and MCP approvals. |
+| `allowedUserIds` | Other Slack user IDs that may ask Fenix anything its tools cover; their requests still pass the input guard. Everyone else gets a friendly "not ready yet" reply. |
 | `ownerName` | Name shown in access and error messages. |
 | `adminDmChannel` | DM channel where messages from non-owners are forwarded (optional). |
 | `teamcity.url` / `teamcity.botId` | TeamCity base URL and the Slack bot ID of the TeamCity app, whose failure posts trigger the analysis. |
@@ -522,8 +530,8 @@ WantedBy=multi-user.target
 
 ## Security model
 
-- **Owner allowlist.** Only `ownerIds` can use the agent. Others get a polite reply in DMs and mentions, and silence
-  everywhere else.
+- **Named allowlist.** Only `ownerIds` and `allowedUserIds` can use the agent; admin tools and commands stay with the
+  owners. Others get a polite reply in DMs and mentions, and silence everywhere else.
 - **Input guard.** Every non-owner request is screened before the access check: probing for credentials or
   infrastructure, or attempting prompt injection, earns a warning, and a second attempt within 24 hours blocks the
   user. Owners are never screened.

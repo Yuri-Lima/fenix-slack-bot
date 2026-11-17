@@ -1,12 +1,22 @@
 import { config } from '../config.js';
 
 /**
- * Check if a user bypasses all guards (access gate + input filter + strikes).
+ * Owners bypass all guards (access gate, input filter, strikes) and alone get admin tools,
+ * owner commands and approvals.
  * @param {string} userId
  * @returns {boolean}
  */
-export function isWhitelisted(userId) {
+export function isOwner(userId) {
   return config.ownerIds.includes(userId);
+}
+
+/**
+ * May ask Fenix: an owner or someone on `allowedUserIds`. Allowed users still pass the input filter.
+ * @param {string} userId
+ * @returns {boolean}
+ */
+export function isAllowed(userId) {
+  return isOwner(userId) || config.allowedUserIds.includes(userId);
 }
 
 // Term lists accept plurals (`keys?`), and path fragments that start with `.`,
@@ -106,10 +116,10 @@ const MESSAGES = {
     `Contact ${config.ownerName} if you need help.`,
 };
 
-/** Reply to anyone who is not on the owner list. */
+/** Reply to anyone who is neither an owner nor on the allowed list. */
 const ACCESS_DENIED_MESSAGE =
   "Hey! I'm still a work in progress and not ready for everyone yet. " +
-  `Only ${config.ownerName} can use me for now while I'm being tested. Stay tuned!`;
+  `Ask ${config.ownerName} if you'd like access. Stay tuned!`;
 
 /** Generic reply when handling a request fails unexpectedly. */
 export const GENERIC_ERROR_MESSAGE = `:warning: Something went wrong. Please try again or contact ${config.ownerName}.`;
@@ -125,13 +135,13 @@ export const GENERIC_ERROR_MESSAGE = `:warning: Something went wrong. Please try
  * Single entry point for request screening, run before the agent. Owners pass
  * straight through. Everyone else is screened by the input guard first
  * (blocked users, credential/infra probes, prompt injection, with strikes),
- * and a clean request then gets the access-denied reply.
+ * and a clean request proceeds for users on `allowedUserIds`; anyone else gets the access-denied reply.
  * @param {string} userId
  * @param {string} text
  * @returns {GateResult | null} null when the request may proceed to the agent
  */
 export function gateRequest(userId, text) {
-  if (isWhitelisted(userId)) return null;
+  if (isOwner(userId)) return null;
   if (isBlocked(userId)) return { reply: MESSAGES.blocked, verdict: 'clean', strikes: 0 };
 
   const { verdict } = classifyInput(text);
@@ -139,5 +149,5 @@ export function gateRequest(userId, text) {
     const count = addStrike(userId);
     return { reply: count >= MAX_STRIKES ? MESSAGES.blocked : MESSAGES[verdict], verdict, strikes: count };
   }
-  return { reply: ACCESS_DENIED_MESSAGE, verdict, strikes: 0 };
+  return isAllowed(userId) ? null : { reply: ACCESS_DENIED_MESSAGE, verdict, strikes: 0 };
 }

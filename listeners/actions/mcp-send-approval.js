@@ -1,6 +1,6 @@
 import { createSlackDirectory, deliverMessage } from '../../agent/tools/slack.js';
 import { takeDraft } from '../../mcp/send-approval.js';
-import { isWhitelisted } from '../../utils/input-guard.js';
+import { isOwner } from '../../utils/input-guard.js';
 import { recordUsage, ruleBasedRun } from '../../utils/usage-store.js';
 import { buildSendDecisionBlocks, SEND_ACTION } from '../views/mcp-send-approval-builder.js';
 
@@ -16,7 +16,7 @@ export async function handleMcpSendDecision({ ack, body, client, logger }) {
   await ack();
   const startedAt = Date.now();
   const userId = body.user.id;
-  if (!isWhitelisted(userId)) return;
+  if (!isOwner(userId)) return;
 
   const action = body.actions[0];
   const draft = takeDraft(action.value || '');

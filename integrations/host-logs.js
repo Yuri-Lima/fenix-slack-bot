@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import { compact } from '../utils/helpers.js';
 import { lokiInstant, lokiRange } from './grafana.js';
-import { clip, clock, ERROR_LINE_RE, logPattern, q, re, readableLogLine } from './host-health.js';
+import { clip, clock, dayLabel, ERROR_LINE_RE, logPattern, q, re, readableLogLine } from './host-health.js';
 
 // Recent logs of one server from Loki, condensed for the agent: the host name a person
 // typed is resolved to a Loki `host`, repeated lines are grouped, and the result is a
@@ -93,13 +93,13 @@ export function groupLogLines(streams) {
 }
 
 /**
- * Read one host's logs for the last `minutes`.
+ * Read one host's logs for the `minutes` before `end` (default now).
  * @param {string} host - Exact Loki host
- * @param {{ minutes: number, service?: string, search?: string, problemsOnly?: boolean }} options
+ * @param {{ minutes: number, end?: number, service?: string, search?: string, problemsOnly?: boolean }} options
  * @returns {Promise<HostLogs>}
  */
-export async function readHostLogs(host, { minutes, service, search, problemsOnly = false }) {
-  const end = Math.floor(Date.now() / 1000);
+export async function readHostLogs(host, { minutes, end: until, service, search, problemsOnly = false }) {
+  const end = Math.min(until ?? Number.POSITIVE_INFINITY, Math.floor(Date.now() / 1000));
   const start = end - minutes * 60;
   const selector = `{host="${q(host)}"${service ? `, service="${q(service)}"` : ''}}`;
   const filters = [problemsOnly ? ` |~ "${q(ERROR_LINE_RE)}"` : '', search ? ` |~ "(?i)${re(search)}"` : ''].join('');
@@ -128,10 +128,13 @@ export function formatHostLogs(logs, { service, search, problemsOnly } = {}) {
     search && `lines containing "${search}"`,
   ].filter(Boolean);
   const total = Object.values(logs.byService).reduce((a, b) => a + b, 0);
+  // Windows that are not today's carry the date; "last" only for a window ending now
+  const today = dayLabel(Date.now() / 1000) === dayLabel(logs.end);
+  const recent = Date.now() / 1000 - logs.end < 60;
   const lines = [
-    `Logs of ${logs.host}, ${clock(logs.start)}–${clock(logs.end)} (${config.timeZone}), last ${minutes} minutes${
-      what.length ? `, ${what.join(', ')}` : ''
-    }:`,
+    `Logs of ${logs.host}, ${today ? '' : `${dayLabel(logs.start)} `}${clock(logs.start)}–${clock(logs.end)} (${
+      config.timeZone
+    }), ${recent ? 'last ' : ''}${minutes} minutes${what.length ? `, ${what.join(', ')}` : ''}:`,
   ];
   if (total === 0 && logs.read === 0) {
     lines.push('No matching log lines in this window.');

@@ -17,7 +17,7 @@ const MAX_ERROR_LINES = 300;
 const WAIT_CAUSE_RE = /pool exhausted|timed? ?out|connection reset|connection refused|deadlock|lock wait/i;
 /** A host counts as unreachable when its last metric sample is older than this at the end of the window. */
 const STALE_AFTER_SEC = 120;
-/** Analysis window after the alert start; a still-firing alert is analysed right away, so this only bounds replays. */
+/** Analysis window after an alert start when no end is given; a still-firing alert is analysed right away, so this only bounds replays. */
 const MAX_WINDOW_SEC = 30 * 60;
 
 /** Kinds of alert rules Fenix knows how to explain. */
@@ -246,13 +246,13 @@ export function clip(text, max) {
 
 /**
  * Gather metrics and logs for a host around an alert.
- * @param {string} host - Host name as shown in the alert (node_exporter instance, Loki host prefix)
- * @param {{ start: number, end?: number }} window - Unix seconds; end defaults to now
+ * @param {string} host - Host name as shown in the alert (node_exporter instance)
+ * @param {{ start: number, end?: number }} window - Unix seconds; without an end, up to MAX_WINDOW_SEC after start
  * @returns {Promise<HostEvidence>}
  */
 export async function collectHostEvidence(host, { start, end }) {
   const now = Math.floor(Date.now() / 1000);
-  const to = Math.min(end ?? now, now, start + MAX_WINDOW_SEC);
+  const to = Math.min(end ?? start + MAX_WINDOW_SEC, now);
   const from = start - LEAD_IN_SEC;
   const step = Math.max(30, Math.round((to - from) / 40));
   const H = q(host);
@@ -691,6 +691,68 @@ export function diagnose(kind, e) {
  */
 function topService(byService) {
   return Object.entries(byService).sort((a, b) => b[1] - a[1])[0]?.[0] || 'the busiest service';
+}
+
+/**
+ * Offset of the configured time zone from UTC at a moment, in milliseconds.
+ * @param {number} ms
+ * @returns {number}
+ */
+function zoneOffsetMs(ms) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: config.timeZone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+      .formatToParts(new Date(ms))
+      .map((p) => [p.type, p.value]),
+  );
+  const wall = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+  return wall - Math.floor(ms / 1000) * 1000;
+}
+
+/**
+ * Unix seconds for a time someone gave. With `Z` or an offset it is taken as is; without one
+ * (e.g. "2026-11-16 11:10") it is read in the configured time zone, the one Fenix shows times in.
+ * @param {string} text - "YYYY-MM-DD HH:MM[:SS]", optionally with "T" and "Z" / "+01:00"
+ * @returns {number | null} null when the text is not such a time
+ */
+export function parseLocalTime(text) {
+  const m = /^(\d{4})-(\d\d)-(\d\d)[T ](\d\d?):(\d\d)(?::(\d\d))?(?:\.\d+)?\s*(Z|[+-]\d\d:\d\d)?$/i.exec(text.trim());
+  if (!m) return null;
+  const [, y, mo, d, h, mi, sec = '0', zone] = m;
+  const wall = Date.UTC(+y, +mo - 1, +d, +h, +mi, +sec);
+  if (Number.isNaN(wall)) return null;
+  if (zone) {
+    const offset =
+      zone.toUpperCase() === 'Z' ? 0 : (zone[0] === '-' ? -1 : 1) * (+zone.slice(1, 3) * 60 + +zone.slice(4, 6));
+    return Math.floor((wall - offset * 60_000) / 1000);
+  }
+  // Two passes so a time just after a daylight-saving switch gets the right offset
+  const guess = wall - zoneOffsetMs(wall);
+  return Math.floor((wall - zoneOffsetMs(guess)) / 1000);
+}
+
+/**
+ * "Mon 16 Nov" (or "Mon 16 Nov 2026") in the configured time zone.
+ * @param {number} sec
+ * @param {{ year?: boolean }} [options]
+ * @returns {string}
+ */
+export function dayLabel(sec, { year = false } = {}) {
+  return new Date(sec * 1000).toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    ...(year && { year: 'numeric' }),
+    timeZone: config.timeZone,
+  });
 }
 
 /**

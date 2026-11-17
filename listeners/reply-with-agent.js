@@ -1,5 +1,6 @@
 import { runFenixAgent } from '../agent/index.js';
 import { sessionStore } from '../thread-context/index.js';
+import { readSlackImages } from '../utils/slack.js';
 import { formatUsageFooter } from '../utils/usage-report.js';
 import { monthToDate } from '../utils/usage-store.js';
 import { buildFeedbackBlocks } from './views/feedback-builder.js';
@@ -27,6 +28,7 @@ const LOADING_MESSAGES = [
  * @param {string | null | undefined} opts.existingSessionId
  * @param {Function} opts.setStatus
  * @param {Function} opts.sayStream
+ * @param {Parameters<typeof readSlackImages>[1]} [opts.files] - Files attached to the message; images are read
  */
 export async function replyWithAgent({
   text,
@@ -39,15 +41,24 @@ export async function replyWithAgent({
   existingSessionId,
   setStatus,
   sayStream,
+  files = [],
 }) {
   await setStatus({ status: 'Thinking…', loading_messages: LOADING_MESSAGES });
+
+  const { images, skipped } = await readSlackImages(client, files);
+  const prompt = [
+    text || (images.length ? '(No text; see the attached images.)' : ''),
+    skipped.length ? `[Attachments you could not read: ${skipped.join('; ')}]` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 
   const deps = { client, channelId, threadTs, messageTs, userId, userName };
   const {
     responseText,
     sessionId: newSessionId,
     usage,
-  } = await runFenixAgent(text, existingSessionId ?? undefined, deps);
+  } = await runFenixAgent(prompt, existingSessionId ?? undefined, deps, { images });
 
   if (newSessionId) {
     sessionStore.setSession(channelId, threadTs, newSessionId);

@@ -1,6 +1,7 @@
 {
   "teamName": "the test team",
   "ownerIds": ["U0OWNER"],
+  "allowedUserIds": ["U0ALLOWED"],
   "ownerName": "Owner",
   "adminDmChannel": "D0ADMIN",
   "teamcity": {

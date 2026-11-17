@@ -273,3 +273,14 @@ describe('ignoredBy', () => {
     );
   });
 });
+
+describe('parseLocalTime', () => {
+  // The test config's time zone is UTC
+  it('reads a local time in the configured zone and honours an explicit offset', async () => {
+    const { parseLocalTime } = await import('../../integrations/host-health.js');
+    assert.strictEqual(parseLocalTime('2026-11-16 11:10'), Date.parse('2026-11-16T11:10:00Z') / 1000);
+    assert.strictEqual(parseLocalTime('2026-11-16T11:10+01:00'), Date.parse('2026-11-16T10:10:00Z') / 1000);
+    assert.strictEqual(parseLocalTime('2026-11-16T10:11:35Z'), Date.parse('2026-11-16T10:11:35Z') / 1000);
+    assert.strictEqual(parseLocalTime('yesterday 11:10'), null);
+  });
+});

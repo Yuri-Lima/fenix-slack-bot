@@ -1,5 +1,5 @@
 import { sessionStore } from '../../thread-context/index.js';
-import { GENERIC_ERROR_MESSAGE, gateRequest, isWhitelisted } from '../../utils/input-guard.js';
+import { GENERIC_ERROR_MESSAGE, gateRequest, isOwner } from '../../utils/input-guard.js';
 import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
 import { handleDeleteCommand, isDeleteCommand } from './delete-thread.js';
@@ -23,7 +23,7 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     // `@Fenix delete` removes the bot's messages from the thread. Owner-only;
     // anyone else sending it is ignored without a reply.
     if (isDeleteCommand(cleanedText)) {
-      if (!isWhitelisted(userId)) return;
+      if (!isOwner(userId)) return;
       await handleDeleteCommand({ client, event, botUserId: context.botUserId, botId: context.botId, logger });
       return;
     }
@@ -31,7 +31,7 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     // `@Fenix report [period]`: usage report built in code (no AI tokens). Owner-only.
     const reportPeriod = parseReportCommand(cleanedText);
     if (reportPeriod !== null) {
-      if (!isWhitelisted(userId)) return;
+      if (!isOwner(userId)) return;
       await handleReportCommand({ client, channel: channelId, threadTs, periodArg: reportPeriod });
       return;
     }
@@ -49,7 +49,9 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
       return;
     }
 
-    if (!cleanedText) {
+    // Files shared with the mention (screenshots are read as images)
+    const files = /** @type {any} */ (event).files;
+    if (!cleanedText && !files?.length) {
       await say({
         text: 'Hey! Ask me about a build, a flaky test, a YouTrack ticket, or the codebase.',
         thread_ts: threadTs,
@@ -80,6 +82,7 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
       existingSessionId,
       setStatus,
       sayStream,
+      files,
     });
   } catch (e) {
     logger.error(`Failed to handle app mention: ${e}`);

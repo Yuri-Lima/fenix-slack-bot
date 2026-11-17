@@ -3,7 +3,9 @@ import { z } from 'zod';
 import { config } from '../../config.js';
 import {
   clip,
+  clock,
   collectHostEvidence,
+  dayLabel,
   diagnose,
   evidenceFields,
   ignoredBy,
@@ -12,6 +14,7 @@ import {
   lastSeenWithin,
   logHosts,
   notableKinds,
+  parseLocalTime,
   VERDICT_STATUS,
 } from '../../integrations/host-health.js';
 import { formatHostLogs, MAX_LOG_MINUTES, readHostLogs, resolveLogHost } from '../../integrations/host-logs.js';
@@ -24,22 +27,48 @@ const LOOKBACK_DAYS = 7;
 /** Error line length handed to the model; enough for the cause, cheap in tokens. */
 const MAX_ERROR_CHARS = 400;
 
+/** The `end` parameter both tools share: a past moment to look at instead of now. */
+const endParam = z
+  .string()
+  .optional()
+  .describe(
+    `End of the window, "YYYY-MM-DD HH:MM" in ${config.timeZone} (default: now). For a past moment, end a little ` +
+      'after it, e.g. "what happened at 11:10 yesterday" → end 11:25 of that day with minutes 30.',
+  );
+
+/**
+ * Unix seconds for the `end` parameter, now when it is missing, or an error text.
+ * @param {string | undefined} end
+ * @returns {{ sec: number } | { error: string }}
+ */
+function windowEnd(end) {
+  const now = Math.floor(Date.now() / 1000);
+  if (!end) return { sec: now };
+  const sec = parseLocalTime(end);
+  if (sec === null) return { error: `"${end}" is not a time like "2026-11-16 11:25" (${config.timeZone}).` };
+  return { sec: Math.min(sec, now) };
+}
+
 /** Strip Slack emoji codes and markup so the text reads well outside Slack too. */
 const plain = (/** @type {string} */ s) => s.replace(/:[a-z_]+: /g, '').replace(/\*/g, '');
 
 export const hostHealthTool = tool(
   'host_health',
-  'Current health of one server from Grafana metrics and logs: reachability, CPU and load, memory and swap, ' +
-    'disk, Phoenix health checks, and recent error patterns, with a plain-language verdict. ' +
-    'Use for "how is <server> doing?" or to investigate a server named in an alert.',
+  'Health of one server from Grafana metrics and logs, now or at a past moment: reachability, CPU and load, ' +
+    'memory and swap, disk, Phoenix health checks, and error patterns, with a plain-language verdict. ' +
+    'Use for "how is <server> doing?", "was <server> slow yesterday at 10:00?", or a server named in an alert.',
   {
     host: z.string().describe("Server name as it appears in alerts and Grafana, e.g. 'web-01'."),
-    minutes: z.number().min(5).max(180).optional().describe('How far back to look (default 30).'),
+    minutes: z.number().min(5).max(180).optional().describe('Length of the window before its end (default 30).'),
+    end: endParam,
   },
-  async ({ host, minutes = 30 }) => {
+  async ({ host, minutes = 30, end }) => {
     if (ignoredBy(host)) return textResult(ignoredHostMessage(host));
+    const until = windowEnd(end);
+    if ('error' in until) return textResult(until.error, true);
     try {
-      const evidence = await collectHostEvidence(host, { start: Math.floor(Date.now() / 1000) - minutes * 60 });
+      const start = until.sec - minutes * 60;
+      const evidence = await collectHostEvidence(host, { start, end: until.sec });
       if (evidence.reachability.nodeLastSeen === null && evidence.cpus === null) {
         const lastSeen = await lastSeenWithin(host, LOOKBACK_DAYS);
         return lastSeen
@@ -57,7 +86,11 @@ export const hostHealthTool = tool(
             .map((v) => [v.title, v]),
         ).values(),
       ].sort((a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status));
-      const lines = [`${host}, last ${minutes} minutes:`];
+      const lines = [
+        end
+          ? `${host}, ${dayLabel(start)} ${clock(start)}–${clock(until.sec)} (${config.timeZone}):`
+          : `${host}, last ${minutes} minutes:`,
+      ];
       for (const v of verdicts) {
         lines.push(`- ${VERDICT_STATUS[v.status].label}: ${v.title}. ${plain(v.detail)} Next step: ${v.nextStep}`);
       }
@@ -77,18 +110,27 @@ const MAX_SIMILAR = 5;
 
 export const hostLogsTool = tool(
   'host_logs',
-  "Read one server's recent logs from Grafana Loki, grouped into a timeline (repeated lines counted, " +
-    'secrets masked). Use when someone asks what happened on a server or client in the last minutes, ' +
+  "Read one server's logs from Grafana Loki, now or at a past moment, grouped into a timeline (repeated lines " +
+    'counted, secrets masked). Use when someone asks what happened on a server or client, recently or at a given time, ' +
     'or to look for a specific error or text in its logs. Accepts the name people use (case and dashes ' +
     'do not matter); if it matches several servers the result lists them.',
   {
     host: z.string().describe("Server or client name, e.g. 'web-01'."),
-    minutes: z.number().int().min(1).max(MAX_LOG_MINUTES).optional().describe('How far back to read (default 15).'),
+    minutes: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_LOG_MINUTES)
+      .optional()
+      .describe('Length of the window before its end (default 15).'),
     service: z.string().optional().describe('Only this service, as named in the logs (see the totals line).'),
     search: z.string().optional().describe('Only lines containing this text (case-insensitive).'),
     problems_only: z.boolean().optional().describe('Only lines that look like errors, timeouts or kills.'),
+    end: endParam,
   },
-  async ({ host, minutes = 15, service, search, problems_only: problemsOnly }) => {
+  async ({ host, minutes = 15, service, search, problems_only: problemsOnly, end }) => {
+    const until = windowEnd(end);
+    if ('error' in until) return textResult(until.error, true);
     try {
       if (ignoredBy(host)) return textResult(ignoredHostMessage(host));
       const match = resolveLogHost(
@@ -102,7 +144,7 @@ export const hostLogsTool = tool(
             )
           : textResult(`No server named like "${host}" sent logs in the last 24 hours. Check the name.`, true);
       }
-      const logs = await readHostLogs(match.host, { minutes, service, search, problemsOnly });
+      const logs = await readHostLogs(match.host, { minutes, end: until.sec, service, search, problemsOnly });
       const similar = match.similar.length
         ? `\nOther servers with a similar name: ${match.similar.slice(0, MAX_SIMILAR).join(', ')}.`
         : '';

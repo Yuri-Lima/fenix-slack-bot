@@ -1,16 +1,18 @@
 import { config } from '../../config.js';
 import { sessionStore } from '../../thread-context/index.js';
-import { GENERIC_ERROR_MESSAGE, gateRequest, isWhitelisted } from '../../utils/input-guard.js';
+import { GENERIC_ERROR_MESSAGE, gateRequest, isAllowed, isOwner } from '../../utils/input-guard.js';
 import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
 import { handleReportCommand, parseReportCommand } from './usage-report-command.js';
 
 /**
+ * A message a person wrote: no subtype, or `file_share` (a message with uploaded files).
+ * Edits, deletions, joins and other subtypes are not.
  * @param {import('@slack/types').MessageEvent} event
  * @returns {event is import('@slack/types').GenericMessageEvent}
  */
-function isGenericMessageEvent(event) {
-  return !('subtype' in event && event.subtype !== undefined);
+export function isUserMessage(event) {
+  return !('subtype' in event) || event.subtype === undefined || event.subtype === 'file_share';
 }
 
 async function forwardDmToOwner(client, event, logger) {
@@ -35,8 +37,8 @@ async function forwardDmToOwner(client, event, logger) {
  * @returns {Promise<void>}
  */
 export async function handleMessage({ client, context, event, logger, say, sayStream, setStatus }) {
-  // Skip message subtypes (edits, deletes, etc.)
-  if (!isGenericMessageEvent(event)) return;
+  // Skip edits, deletions and other subtypes; messages with files are handled
+  if (!isUserMessage(event)) return;
 
   // Skip bot messages, including Fenix's own
   if (event.bot_id) return;
@@ -55,8 +57,8 @@ export async function handleMessage({ client, context, event, logger, say, saySt
   const text = event.text || '';
   const threadTs = event.thread_ts || event.ts;
 
-  // Forward DMs from non-whitelisted users to the admin DM channel
-  if (!isWhitelisted(userId)) {
+  // Forward DMs from people without access to the admin DM channel
+  if (!isAllowed(userId)) {
     forwardDmToOwner(client, event, logger);
   }
 
@@ -73,9 +75,10 @@ export async function handleMessage({ client, context, event, logger, say, saySt
     return;
   }
 
-  // `report [period]`: usage report built in code (no AI tokens); only owners get past the gate
+  // `report [period]`: usage report built in code (no AI tokens). Owner-only; for anyone else it is
+  // an ordinary message
   const reportPeriod = parseReportCommand(text);
-  if (reportPeriod !== null) {
+  if (reportPeriod !== null && isOwner(userId)) {
     await handleReportCommand({ client, channel: event.channel, threadTs, periodArg: reportPeriod });
     return;
   }
@@ -106,6 +109,7 @@ export async function handleMessage({ client, context, event, logger, say, saySt
       existingSessionId,
       setStatus,
       sayStream,
+      files: /** @type {any} */ (event).files,
     });
   } catch (e) {
     logger.error(`Failed to handle message: ${e}`);

@@ -13,7 +13,8 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 /**
  * @typedef {Object} FenixConfig
  * @property {string} teamName - Team the bot serves, used in the system prompt
- * @property {string[]} ownerIds - Slack user IDs allowed to use the bot
+ * @property {string[]} ownerIds - Slack user IDs of the owners: full access, admin tools and approvals
+ * @property {string[]} allowedUserIds - Other Slack user IDs that may ask Fenix (no admin tools or commands)
  * @property {string} ownerName - Name shown in access-denied and error messages
  * @property {string | null} adminDmChannel - DM channel where messages from non-owners are forwarded
  * @property {{ url: string | null, botId: string | null, keyConfigs: BuildConfigHint[] }} teamcity
@@ -35,6 +36,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const DEFAULTS = {
   teamName: 'the engineering team',
   ownerIds: [],
+  allowedUserIds: [],
   ownerName: 'the bot owner',
   adminDmChannel: null,
   teamcity: { url: null, botId: null, keyConfigs: [] },

@@ -1,5 +1,5 @@
 import { decideAuthorization } from '../../mcp/oauth.js';
-import { isWhitelisted } from '../../utils/input-guard.js';
+import { isOwner } from '../../utils/input-guard.js';
 import { APPROVE_ACTION, buildDecisionBlocks } from '../views/mcp-oauth-approval-builder.js';
 
 /**
@@ -10,7 +10,7 @@ import { APPROVE_ACTION, buildDecisionBlocks } from '../views/mcp-oauth-approval
 export async function handleMcpOAuthDecision({ ack, body, client, logger }) {
   await ack();
   const userId = body.user.id;
-  if (!isWhitelisted(userId)) return;
+  if (!isOwner(userId)) return;
 
   const action = body.actions[0];
   const decision = action.action_id === APPROVE_ACTION ? 'approved' : 'denied';

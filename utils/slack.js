@@ -2,6 +2,8 @@ import { createReadStream } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { pipeline } from 'node:stream/promises';
+import { FETCH_TIMEOUT_MS } from '../integrations/http.js';
+import { sniffMedia } from '../mcp/uploads.js';
 
 /** Longest a file upload to Slack may stall without progress before it is abandoned. */
 const UPLOAD_TIMEOUT_MS = 10 * 60_000;
@@ -30,6 +32,67 @@ export async function resolveUserName(client, userId) {
   } catch {
     return cached?.name || userId;
   }
+}
+
+/** Images read from one message; the rest are named as skipped. */
+export const MAX_IMAGES_PER_MESSAGE = 4;
+/** Largest image the Claude API accepts. */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** Image types the Claude API reads. */
+const READABLE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+/** The bot token is only ever sent to Slack's own file host. */
+const SLACK_FILE_URL = /^https:\/\/files\.slack\.com\//;
+
+/**
+ * An image from a Slack message, ready for the model.
+ * @typedef {{ name: string, mediaType: string, data: string }} SlackImage - data is base64
+ */
+
+/**
+ * Download the images attached to a Slack message (needs the files:read scope). The type is
+ * checked from the bytes, not trusted from Slack. Files that are not readable images, too large,
+ * beyond the per-message limit, or fail to download are listed in `skipped` with the reason.
+ * @param {import('@slack/web-api').WebClient} client
+ * @param {Array<{ id?: string, name?: string, title?: string, mimetype?: string, filetype?: string, size?: number, url_private?: string, url_private_download?: string }>} [files]
+ * @returns {Promise<{ images: SlackImage[], skipped: string[] }>}
+ */
+export async function readSlackImages(client, files = []) {
+  /** @type {SlackImage[]} */
+  const images = [];
+  /** @type {string[]} */
+  const skipped = [];
+  for (const f of files) {
+    const name = f.name || f.title || f.id || 'file';
+    const url = f.url_private_download || f.url_private || '';
+    if (!READABLE_IMAGE_TYPES.has(f.mimetype ?? '')) {
+      skipped.push(`${name} (${f.filetype || f.mimetype || 'unknown type'}, not an image)`);
+    } else if (images.length >= MAX_IMAGES_PER_MESSAGE) {
+      skipped.push(`${name} (only the first ${MAX_IMAGES_PER_MESSAGE} images are read)`);
+    } else if ((f.size ?? 0) > MAX_IMAGE_BYTES) {
+      skipped.push(`${name} (larger than 5 MB)`);
+    } else if (!SLACK_FILE_URL.test(url)) {
+      skipped.push(`${name} (no Slack download link)`);
+    } else {
+      try {
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${client.token}` },
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = Buffer.from(await res.arrayBuffer());
+        const type = sniffMedia(data);
+        // A missing files:read scope returns an HTML sign-in page, which this also catches
+        if (type?.kind !== 'image' || data.length > MAX_IMAGE_BYTES) {
+          skipped.push(`${name} (could not be read as an image)`);
+        } else {
+          images.push({ name, mediaType: type.mimeType, data: data.toString('base64') });
+        }
+      } catch (e) {
+        skipped.push(`${name} (download failed: ${/** @type {Error} */ (e).message})`);
+      }
+    }
+  }
+  return { images, skipped };
 }
 
 /**

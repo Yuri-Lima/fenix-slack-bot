@@ -51,10 +51,12 @@ describe('groupLogLines', () => {
 });
 
 describe('formatHostLogs', () => {
+  // A window ending now; group times only need to be inside it for the format checks
+  const now = Math.floor(Date.now() / 1000);
   const logs = {
     host: 'alpha',
-    start: 1000,
-    end: 1300,
+    start: now - 300,
+    end: now,
     byService: { worker: 1200, app: 30 },
     read: 500,
     groups: [
@@ -97,5 +99,13 @@ describe('formatHostLogs', () => {
     const text = formatHostLogs({ ...logs, groups: many });
     assert.match(text, /FATAL crash/);
     assert.match(text, /\(21 quieter groups without errors not shown\)$/);
+  });
+});
+
+describe('formatHostLogs for a past window', () => {
+  it('names the day and does not call it "last"', () => {
+    const end = Date.parse('2026-11-16T11:25:00Z') / 1000;
+    const text = formatHostLogs({ host: 'alpha', start: end - 1800, end, byService: {}, read: 0, groups: [] });
+    assert.strictEqual(text.split('\n')[0], 'Logs of alpha, Mon 16 Nov 10:55–11:25 (UTC), 30 minutes:');
   });
 });

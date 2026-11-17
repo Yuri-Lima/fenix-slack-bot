@@ -29,4 +29,11 @@ describe('collectHostEvidence log queries', () => {
       assert.ok(!q.includes('=~'), q);
     }
   });
+
+  it('honours an explicit end beyond the 30-minute replay window', async () => {
+    lokiRange.mock.resetCalls();
+    const end = Math.floor(Date.now() / 1000) - 3600;
+    await collectHostEvidence('alpha', { start: end - 3 * 3600, end });
+    assert.strictEqual(lokiRange.mock.calls[0].arguments[2], end);
+  });
 });

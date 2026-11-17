@@ -1,7 +1,7 @@
 import assert from 'node:assert';
 import { beforeEach, describe, it, mock } from 'node:test';
 
-import { handleMessage } from '../../../listeners/events/message.js';
+import { handleMessage, isUserMessage } from '../../../listeners/events/message.js';
 import { sessionStore } from '../../../thread-context/index.js';
 
 const OUTSIDER = 'U0OUTSIDER';
@@ -56,6 +56,39 @@ describe('handleMessage access gate', () => {
 
   it('replies with the gate message to a DM from a non-whitelisted user', async () => {
     await run({ channel: 'D1', channel_type: 'im', user: OUTSIDER, text: 'hi', ts: '3.0' });
+    assert.strictEqual(say.mock.callCount(), 1);
+    assert.match(say.mock.calls[0].arguments[0].text, /work in progress/);
+  });
+});
+
+describe('isUserMessage', () => {
+  it('accepts plain messages and messages with files, not edits or deletions', () => {
+    assert.ok(isUserMessage(/** @type {any} */ ({ text: 'hi' })));
+    assert.ok(isUserMessage(/** @type {any} */ ({ subtype: 'file_share', text: 'see screenshot', files: [{}] })));
+    assert.ok(!isUserMessage(/** @type {any} */ ({ subtype: 'message_changed' })));
+    assert.ok(!isUserMessage(/** @type {any} */ ({ subtype: 'message_deleted' })));
+  });
+});
+
+describe('handleMessage with files and the named list', () => {
+  it('answers a DM with files from an outsider with the access reply instead of dropping it', async () => {
+    const say = mock.fn(async () => ({ ok: true }));
+    const client = {
+      users: { info: mock.fn(async () => ({ user: { real_name: 'Outsider' } })) },
+      chat: { postMessage: mock.fn(async () => ({ ok: true })) },
+    };
+    const event = {
+      channel: 'D9',
+      channel_type: 'im',
+      subtype: 'file_share',
+      user: OUTSIDER,
+      text: 'look',
+      ts: '9.0',
+      files: [{}],
+    };
+    await handleMessage(
+      /** @type {any} */ ({ client, context: { botUserId: 'U0BOT' }, event, logger: { error() {}, warn() {} }, say }),
+    );
     assert.strictEqual(say.mock.callCount(), 1);
     assert.match(say.mock.calls[0].arguments[0].text, /work in progress/);
   });

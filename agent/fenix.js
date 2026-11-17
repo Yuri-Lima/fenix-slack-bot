@@ -3,6 +3,7 @@ import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod';
 import { baseUrl, config, resolvePath } from '../config.js';
 import { BLOCKED_PATHS_DESCRIPTION } from '../integrations/gitlab.js';
+import { clock, dayLabel } from '../integrations/host-health.js';
 import { BROKEN_MIN_RATE, FLAKY_MIN_RATE, MIN_RUNS } from '../integrations/test-history.js';
 import { threadKey } from '../thread-context/index.js';
 import {
@@ -13,7 +14,7 @@ import {
   listFeedback,
 } from '../utils/feedback-store.js';
 import { textResult } from '../utils/helpers.js';
-import { isWhitelisted } from '../utils/input-guard.js';
+import { isOwner } from '../utils/input-guard.js';
 import { recordUsage } from '../utils/usage-store.js';
 import { createIgnoreHostsTool } from './tools/grafana.js';
 import { ALL_TOOLS } from './tools/index.js';
@@ -141,12 +142,17 @@ You have read-only access to the team's GitLab repository (${config.gitlab.proje
 You have read-only access to the servers' metrics and logs through Grafana.
 
 **Available tools:**
-- \`host_logs\` — one server's recent logs as a grouped timeline; can filter by service, text, or problems only
-- \`host_health\` — one server's metrics (reachability, CPU, load, memory, disk, health checks) with a verdict
+- \`host_logs\` — one server's logs as a grouped timeline, recent or at a past moment; can filter by service, text, \
+or problems only
+- \`host_health\` — one server's metrics (reachability, CPU, load, memory, disk, health checks) with a verdict, \
+recent or at a past moment
 
 **When someone asks what happened on a server or client** (e.g. "what happened on web-01 in the last 5 minutes"):
 1. Call \`host_logs\` with the name they used and the window they asked for (default 15 minutes). \
 If the result says the name matches several servers, ask which one they mean.
+   For a past moment ("yesterday at 11:10", or a time in a screenshot), pass \`end\` a little after that moment. \
+Each message starts with the time it was sent, so work out dates like "yesterday" from it. Times in screenshots \
+ending in Z are UTC; convert them to the tool's time zone.
 2. If they ask whether it is down, slow, or overloaded, also call \`host_health\`.
 3. Answer their question, not with a log dump: what happened, when (in the time zone the tool gives), \
 which service, and how often. Quote the one or two lines that matter in code spans.
@@ -154,6 +160,11 @@ which service, and how often. Quote the one or two lines that matter in code spa
 with \`problems_only\`, \`service\`, or \`search\` instead of reading everything.
 5. Logs can contain customer data: do not repeat e-mail addresses, personal names, or client IPs \
 unless the question needs them.
+
+## IMAGES
+Users can attach screenshots; you see them with their message. Read what is relevant (error text, times, \
+server names, values) and use it with the tools; do not describe the whole image back. If a message lists \
+attachments you could not read, say which and why in one line.
 
 ## USER FEEDBACK
 When a user wants to give feedback about you (your responses, capabilities, or behavior):
@@ -271,14 +282,50 @@ export function usageFromResult(result) {
 }
 
 /**
+ * The prompt for one user message: stamped with the time it was sent (so "yesterday" and times in
+ * screenshots can be resolved; kept out of the system prompt so that stays cacheable), plus any images.
+ * @param {string} text
+ * @param {import('../utils/slack.js').SlackImage[]} images
+ * @param {number} [nowSec]
+ * @returns {string | AsyncIterable<import('@anthropic-ai/claude-agent-sdk').SDKUserMessage>}
+ */
+export function buildPrompt(text, images, nowSec = Date.now() / 1000) {
+  const stamped = `[Sent ${dayLabel(nowSec, { year: true })}, ${clock(nowSec)} ${config.timeZone}]\n${text}`;
+  if (images.length === 0) return stamped;
+  /** @type {import('@anthropic-ai/claude-agent-sdk').SDKUserMessage} */
+  const message = {
+    type: 'user',
+    parent_tool_use_id: null,
+    message: {
+      role: 'user',
+      content: [
+        ...images.map((i) => ({
+          type: /** @type {const} */ ('image'),
+          source: {
+            type: /** @type {const} */ ('base64'),
+            media_type: /** @type {'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'} */ (i.mediaType),
+            data: i.data,
+          },
+        })),
+        { type: 'text', text: stamped },
+      ],
+    },
+  };
+  return (async function* () {
+    yield message;
+  })();
+}
+
+/**
  * Run the Fenix agent for one user message in a Slack thread. Every run, including
  * rejected and failed ones, is recorded in the usage log.
  * @param {string} text - The user's message text.
  * @param {string | undefined} sessionId - An existing session ID to resume the thread's conversation.
  * @param {FenixDeps} deps - Slack context for the thread; Slack-bound tools close over it.
+ * @param {{ images?: import('../utils/slack.js').SlackImage[] }} [input] - Images attached to the message
  * @returns {Promise<{ responseText: string, sessionId: string | null, usage: import('../utils/usage-store.js').UsageRecord }>}
  */
-export async function runFenixAgent(text, sessionId, deps) {
+export async function runFenixAgent(text, sessionId, deps, { images = [] } = {}) {
   const startedAt = Date.now();
   /**
    * @param {import('../utils/usage-store.js').UsageRecord['outcome']} outcome
@@ -388,8 +435,8 @@ export async function runFenixAgent(text, sessionId, deps) {
   /** @type {Array<import('@anthropic-ai/claude-agent-sdk').SdkMcpToolDefinition<any>>} */
   const closureTools = [addEmojiReactionTool, markResolvedTool, saveFeedbackTool];
 
-  // Admin-only tools: only injected when the caller is whitelisted
-  if (isWhitelisted(deps.userId)) {
+  // Admin-only tools: only injected when the caller is an owner
+  if (isOwner(deps.userId)) {
     const listFeedbackTool = tool(
       'list_user_feedback',
       'List feedback entries with optional filters. Admin only.',
@@ -492,7 +539,8 @@ export async function runFenixAgent(text, sessionId, deps) {
     /** @type {any} */
     let result = null;
 
-    for await (const message of query({ prompt: text, options: { ...options, abortController: ac } })) {
+    const prompt = buildPrompt(text, images);
+    for await (const message of query({ prompt, options: { ...options, abortController: ac } })) {
       if (message.type === 'assistant') {
         for (const block of message.message.content) {
           if (block.type === 'text') {
