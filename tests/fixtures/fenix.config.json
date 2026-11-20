@@ -33,5 +33,22 @@
     "port": 0,
     "path": "/mcp",
     "publicUrl": "https://fenix-mcp.example.com"
+  },
+  "usage": {
+    "retentionMonths": 12,
+    "budgets": {
+      "userDailyUsd": 3,
+      "userMonthlyUsd": 30,
+      "teamMonthlyUsd": 10000,
+      "replyMaxUsd": 1,
+      "threadMaxUsd": 2,
+      "warnAt": 0.8,
+      "perUser": {
+        "U0BIG": {
+          "dailyUsd": 10,
+          "monthlyUsd": null
+        }
+      }
+    }
   }
 }

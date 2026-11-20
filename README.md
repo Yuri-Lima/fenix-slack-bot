@@ -44,7 +44,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | 🎫 | **YouTrack assistant** | Search, read, create, and update issues in natural language, with explicit confirmation before any write. |
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
 | 📝 | **"Create YouTrack Ticket" shortcut** | Message shortcut that turns any Slack message (and its surrounding context) into a pre-filled ticket. |
-| 📊 | **Usage tracking** | Every agent reply ends with its model, tokens, cost and steps, plus the month to date. Every run is logged to a monthly file, and `report` gives a full usage report computed in code (no AI tokens). |
+| 📊 | **Usage tracking and budgets** | Every agent reply ends with its model, tokens, cost and steps, plus the month to date. Every run is logged to a monthly file, and `report` gives a full usage report computed in code (no AI tokens). Daily, monthly and team spending limits keep the team from using up the API credits. |
 | 🔌 | **Claude Code connection (MCP)** | An authenticated MCP endpoint serves Fenix's read-only tools (TeamCity, flaky tests, server health and logs, codebase, YouTrack search, usage) to Claude Code, plus `slack_send_message` for the owner, so Claude can write a message and post it as Fenix. All service tokens stay on the Fenix server. |
 | 🧹 | **Thread cleanup** | `@Fenix delete` removes every message Fenix posted in a thread. |
 | 💬 | **Feedback loop** | 👍/👎 buttons on every answer plus conversational feedback capture, stored for the owner to review. |
@@ -247,15 +247,37 @@ when a new month starts. A line is about 0.5 KB and never contains message text:
 
 | Field | Content |
 |---|---|
-| `kind`, `outcome` | `agent`, `grafana` or `teamcity`; `ok`, `error`, `timeout` or `busy` |
+| `kind`, `outcome` | `agent`, `grafana`, `teamcity` or `mcp`; `ok`, `error`, `timeout`, `busy` or `budget` (refused by a spending limit) |
 | `models` | Per model ID: fresh input, output, cache-read and cache-write tokens, and estimated cost |
-| `costUsd`, `turns`, `durationMs` | Totals for the run, from the Agent SDK's final result |
+| `costUsd`, `turns`, `durationMs` | Totals for this reply, from the Agent SDK's final result. For a reply in an ongoing thread the SDK reports the whole thread so far, so the thread's totals after its previous reply are subtracted |
 | `tools` | Tool name → number of calls |
 | `userId`, `userName`, `where`, `resumed` | Who asked, in a DM or a channel, and whether the thread continued a conversation |
 
 Agent replies end with a footer such as
 `🤖 sonnet-4-5 · 2.3k in · 800 out · 90.0k cache · $0.04 · 3 steps · 8.0 s · month: 1.23M tokens · $14.20`.
 The month-to-date total is kept in memory, so the footer never re-reads the log.
+
+### Budgets
+
+Before each agent reply Fenix checks the spending limits in `usage.budgets` against the in-memory totals, so a
+check costs no tokens. Owners are never refused. Everyone else has:
+
+| Limit | Default | When reached |
+|---|---|---|
+| `userDailyUsd` | $3 per person per day (`timeZone`) | Fenix replies that the budget resets at midnight, and DMs the owners once |
+| `userMonthlyUsd` | $30 per person per month (UTC) | The same, until the 1st of the next month |
+| `teamMonthlyUsd` | $100 for everyone but the owners together, per month | Only owners get replies until the 1st; the owners get one DM |
+| `threadMaxUsd` | $2 per thread | Fenix asks for a new thread, since every reply in a long thread re-reads all of it |
+| `replyMaxUsd` | $1 per reply, owners included | The SDK stops the reply (`maxBudgetUsd`) and Fenix says why; it is also capped at what is left of the person's budgets, but never below $0.10 |
+
+`perUser` gives a person their own `dailyUsd` / `monthlyUsd`, and `null` turns a limit off. From `warnAt` (80%)
+of a limit, the reply footer shows what is left, e.g. `⏳ budget today: $2.50 of $3.00`. A refused request is
+logged with the outcome `budget`. The costs are the SDK's estimates; the Claude Console's spend limit for the API
+key's workspace is the hard stop if Fenix ever gets it wrong.
+
+When that Console limit is reached, the API refuses every call. Fenix then replies that its API credits are used up
+until the date the API names (instead of a generic error), logs the run with the error `api_usage_limit`, and DMs
+the owners once.
 
 Reports cost no tokens: `report` aggregates the log in code and renders a Block Kit card. Asking in natural
 language ("how much did we spend this week?") uses the owner-only `usage_report` tool, which hands the model only
@@ -455,6 +477,7 @@ cp fenix.config.example.json fenix.config.json
 | `mcp.publicUrl` / `mcp.oauthRedirectUris` / `mcp.cimdOrigins` | Public HTTPS origin of the endpoint, which turns on OAuth sign-in for Claude app connectors; the callback URLs clients may register; and the origins whose client metadata documents may be fetched (defaults: Claude's). |
 | `mcp.maxUploadMb` / `mcp.maxUploadTotalMb` | Largest image or video an MCP client may upload for `slack_send_message` (default 200 MB), and the total held on disk at once (default 1024 MB). |
 | `usage.retentionMonths` | Months of usage logs to keep (default 12). |
+| `usage.budgets` | Spending limits for people other than owners, and per reply: `userDailyUsd`, `userMonthlyUsd`, `teamMonthlyUsd`, `threadMaxUsd`, `replyMaxUsd`, `warnAt`, and `perUser` (Slack ID → own `dailyUsd` / `monthlyUsd`). See *Budgets*. |
 | `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |
 | `dataDir` | Directory for persisted state: feedback and the failure log (default `data`). |

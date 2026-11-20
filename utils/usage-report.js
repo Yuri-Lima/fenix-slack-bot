@@ -1,6 +1,5 @@
-import { config } from '../config.js';
 import { compact, money } from './helpers.js';
-import { readRange, totalTokens } from './usage-store.js';
+import { localDay, readRange, totalTokens } from './usage-store.js';
 
 export { compact, money };
 
@@ -174,7 +173,7 @@ export function aggregateUsage(records, label) {
     u.tokens += total;
     u.costUsd += r.costUsd;
     if (r.where) byWhere[r.where] = (byWhere[r.where] || 0) + 1;
-    const day = new Date(r.ts).toLocaleDateString('en-CA', { timeZone: config.timeZone });
+    const day = localDay(new Date(r.ts));
     const d = byDay.get(day) || { runs: 0, costUsd: 0 };
     d.runs++;
     d.costUsd += r.costUsd;

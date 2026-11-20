@@ -1,6 +1,7 @@
 import { runFenixAgent } from '../agent/index.js';
 import { sessionStore } from '../thread-context/index.js';
 import { readSlackImages } from '../utils/slack.js';
+import { budgetNote } from '../utils/usage-budget.js';
 import { formatUsageFooter } from '../utils/usage-report.js';
 import { monthToDate } from '../utils/usage-store.js';
 import { buildFeedbackBlocks } from './views/feedback-builder.js';
@@ -58,19 +59,25 @@ export async function replyWithAgent({
     responseText,
     sessionId: newSessionId,
     usage,
-  } = await runFenixAgent(prompt, existingSessionId ?? undefined, deps, { images });
+    threadTotals,
+  } = await runFenixAgent(prompt, existingSessionId ?? undefined, deps, {
+    images,
+    threadTotals: existingSessionId ? sessionStore.getTotals(channelId, threadTs) : null,
+  });
 
   if (newSessionId) {
-    sessionStore.setSession(channelId, threadTs, newSessionId);
+    sessionStore.setSession(channelId, threadTs, newSessionId, threadTotals);
   }
 
   const streamer = sayStream();
   await streamer.append({ markdown_text: responseText });
-  // Model, tokens and cost of this reply, plus the month so far; nothing for rejected (busy) runs
+  // Model, tokens and cost of this reply, the month so far, and what is left of a nearly used budget;
+  // nothing for runs that were refused (busy, or over a budget)
+  const refused = usage.outcome === 'busy' || usage.outcome === 'budget';
+  const footerText = [formatUsageFooter(usage, monthToDate()), budgetNote(userId, threadTotals?.costUsd ?? 0)]
+    .filter(Boolean)
+    .join('  ·  ');
   /** @type {import('@slack/types').KnownBlock[]} */
-  const footer =
-    usage.outcome === 'busy'
-      ? []
-      : [{ type: 'context', elements: [{ type: 'mrkdwn', text: formatUsageFooter(usage, monthToDate()) }] }];
+  const footer = refused ? [] : [{ type: 'context', elements: [{ type: 'mrkdwn', text: footerText }] }];
   await streamer.stop({ blocks: [...footer, ...buildFeedbackBlocks()] });
 }

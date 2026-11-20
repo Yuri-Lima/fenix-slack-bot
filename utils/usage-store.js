@@ -25,12 +25,12 @@ mkdirSync(USAGE_DIR, { recursive: true });
  * @typedef {Object} UsageRecord
  * @property {string} ts - ISO time the run finished
  * @property {'agent' | 'grafana' | 'teamcity' | 'mcp'} kind - mcp: a tool call from Claude Code (its tokens are Claude Code's, not Fenix's)
- * @property {'ok' | 'error' | 'timeout' | 'busy'} outcome
+ * @property {'ok' | 'error' | 'timeout' | 'busy' | 'budget'} outcome - budget: refused by a spending limit (no model call)
  * @property {string} [userId]
  * @property {string} [userName]
  * @property {'dm' | 'channel'} [where]
  * @property {Record<string, ModelTokens>} models - Per model ID; empty for runs without an LLM
- * @property {number} costUsd
+ * @property {number} costUsd - This reply's cost (for a resumed thread, without the earlier replies)
  * @property {number} turns
  * @property {number} durationMs
  * @property {Record<string, number>} tools - Tool name -> calls
@@ -97,44 +97,92 @@ export function totalTokens(/** @type {UsageRecord} */ r) {
   return Object.values(r.models).reduce((sum, t) => sum + t.input + t.output + t.cacheRead + t.cacheWrite, 0);
 }
 
-/** Month-to-date totals, kept in memory so the reply footer never re-reads the log. */
-const monthTotals = { month: '', runs: 0, tokens: 0, costUsd: 0 };
-let writeChain = Promise.resolve();
+/**
+ * `2026-11-18` for a date, in config.timeZone: the day daily budgets and report days use.
+ * @param {Date} date
+ * @returns {string}
+ */
+export function localDay(date) {
+  return date.toLocaleDateString('en-CA', { timeZone: config.timeZone });
+}
+
+/** A local day starts at most this long before now, whatever the time zone. */
+const DAY_LOOKBACK_MS = 27 * 3600_000;
 
 /**
- * @param {string} month
+ * Agent totals for the current month and day, kept in memory so footers and budget checks never re-read the log.
+ * users: Slack user ID -> spend this month and today.
+ */
+const totals = {
+  month: '',
+  day: '',
+  runs: 0,
+  tokens: 0,
+  costUsd: 0,
+  /** @type {Map<string, { monthUsd: number, dayUsd: number }>} */
+  users: new Map(),
+};
+let writeChain = Promise.resolve();
+
+/** @param {string | undefined} userId */
+function userTotals(userId) {
+  const id = userId || 'unknown';
+  if (!totals.users.has(id)) totals.users.set(id, { monthUsd: 0, dayUsd: 0 });
+  return /** @type {{ monthUsd: number, dayUsd: number }} */ (totals.users.get(id));
+}
+
+/**
+ * Bring the totals to the month and day of `now`, reading the log only when one of them changed. A new
+ * month also deletes the months past retention.
+ * @param {Date} now
  * @returns {void}
  */
-function loadMonthTotals(month) {
-  Object.assign(monthTotals, { month, runs: 0, tokens: 0, costUsd: 0 });
-  for (const r of readMonth(month)) {
-    if (r.kind !== 'agent') continue;
-    monthTotals.runs++;
-    monthTotals.tokens += totalTokens(r);
-    monthTotals.costUsd += r.costUsd;
+function ensureCurrent(now) {
+  const month = monthKey(now);
+  const day = localDay(now);
+  if (totals.month !== month) {
+    if (totals.month) pruneOldMonths(month);
+    Object.assign(totals, { month, runs: 0, tokens: 0, costUsd: 0 });
+    totals.users.clear();
+    for (const r of readMonth(month)) {
+      if (r.kind !== 'agent') continue;
+      totals.runs++;
+      totals.tokens += totalTokens(r);
+      totals.costUsd += r.costUsd;
+      userTotals(r.userId).monthUsd += r.costUsd;
+    }
+    totals.day = '';
+  }
+  if (totals.day !== day) {
+    totals.day = day;
+    for (const u of totals.users.values()) u.dayUsd = 0;
+    // The local day can start in the previous UTC month, so read by time range, not by month file
+    for (const r of readRange(new Date(now.getTime() - DAY_LOOKBACK_MS), now)) {
+      if (r.kind === 'agent' && localDay(new Date(r.ts)) === day) userTotals(r.userId).dayUsd += r.costUsd;
+    }
   }
 }
 
 /**
- * Append one run to the current month's log. Writes are chained so lines never interleave.
+ * Append one run to its month's log. Writes are chained so lines never interleave. Agent runs of the
+ * current month (and day) are added to the in-memory totals.
  * @param {Omit<UsageRecord, 'ts'> & { ts?: string }} record
  * @returns {Promise<void>}
  */
 export function recordUsage(record) {
-  const now = record.ts ? new Date(record.ts) : new Date();
-  const month = monthKey(now);
-  if (monthTotals.month !== month) {
-    if (monthTotals.month) pruneOldMonths(month);
-    loadMonthTotals(month);
-  }
-  const full = /** @type {UsageRecord} */ ({ ...record, ts: now.toISOString() });
-  if (full.kind === 'agent') {
-    monthTotals.runs++;
-    monthTotals.tokens += totalTokens(full);
-    monthTotals.costUsd += full.costUsd;
+  const at = record.ts ? new Date(record.ts) : new Date();
+  const full = /** @type {UsageRecord} */ ({ ...record, ts: at.toISOString() });
+  ensureCurrent(new Date());
+  if (full.kind === 'agent' && monthKey(at) === totals.month) {
+    totals.runs++;
+    totals.tokens += totalTokens(full);
+    totals.costUsd += full.costUsd;
+    const u = userTotals(full.userId);
+    u.monthUsd += full.costUsd;
+    if (localDay(at) === totals.day) u.dayUsd += full.costUsd;
   }
   writeChain = writeChain
-    .then(() => appendFile(fileFor(month), `${JSON.stringify(full)}\n`, 'utf-8'))
+    .then(() => appendFile(fileFor(monthKey(at)), `${JSON.stringify(full)}\n`, 'utf-8'))
     .catch((e) => console.error(`Usage log write failed: ${e}`));
   return writeChain;
 }
@@ -144,9 +192,18 @@ export function recordUsage(record) {
  * @returns {{ month: string, runs: number, tokens: number, costUsd: number }}
  */
 export function monthToDate() {
-  const month = monthKey(new Date());
-  if (monthTotals.month !== month) loadMonthTotals(month);
-  return { ...monthTotals };
+  ensureCurrent(new Date());
+  const { month, runs, tokens, costUsd } = totals;
+  return { month, runs, tokens, costUsd };
+}
+
+/**
+ * What each person's agent replies cost this month (UTC) and today (config.timeZone).
+ * @returns {Map<string, { monthUsd: number, dayUsd: number }>} Slack user ID -> spend (a copy)
+ */
+export function spendByUser() {
+  ensureCurrent(new Date());
+  return new Map([...totals.users].map(([id, u]) => [id, { ...u }]));
 }
 
 /**

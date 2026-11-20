@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { resolvePath } from '../../config.js';
 import {
   flushUsage,
+  localDay,
   monthKey,
   monthToDate,
   pruneOldMonths,
@@ -13,6 +14,7 @@ import {
   readRange,
   recordUsage,
   ruleBasedRun,
+  spendByUser,
   totalTokens,
 } from '../../utils/usage-store.js';
 
@@ -71,5 +73,21 @@ describe('usage store', () => {
     assert.strictEqual(after.runs, before.runs + 1);
     assert.strictEqual(after.tokens, before.tokens + 1160);
     assert.ok(Math.abs(after.costUsd - before.costUsd - 0.25) < 1e-9);
+  });
+
+  it('names local days in config.timeZone (UTC in tests)', () => {
+    assert.strictEqual(localDay(new Date('2026-11-30T23:30:00Z')), '2026-11-30');
+  });
+
+  it("adds each agent reply to its person's spend for the month and the day", async () => {
+    const id = `U0STORE${Date.now().toString(36)}`;
+    assert.strictEqual(spendByUser().get(id), undefined);
+    await recordUsage({ ...agentRun(new Date().toISOString(), 0.4), userId: id });
+    await recordUsage({ ...agentRun(new Date().toISOString(), 0.1), userId: id });
+    await recordUsage({ ...agentRun('2003-07-01T00:00:00Z', 9), userId: id });
+    await flushUsage();
+    const mine = /** @type {{ monthUsd: number, dayUsd: number }} */ (spendByUser().get(id));
+    assert.ok(Math.abs(mine.monthUsd - 0.5) < 1e-9);
+    assert.ok(Math.abs(mine.dayUsd - 0.5) < 1e-9);
   });
 });

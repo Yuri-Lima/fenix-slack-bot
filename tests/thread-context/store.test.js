@@ -15,6 +15,15 @@ describe('SessionStore', () => {
     assert.strictEqual(store.getSession('C1', 'T1'), 'sid-abc');
   });
 
+  it("keeps a thread's running usage totals with its session", () => {
+    const totals = { models: {}, costUsd: 0.31 };
+    store.setSession('C1', 'T1', 'sid-abc', totals);
+    assert.deepStrictEqual(store.getTotals('C1', 'T1'), totals);
+    store.setSession('C1', 'T2', 'sid-def');
+    assert.strictEqual(store.getTotals('C1', 'T2'), null);
+    assert.strictEqual(store.getTotals('C1', 'T99'), null);
+  });
+
   it('returns null for missing key', () => {
     assert.strictEqual(store.getSession('C1', 'T99'), null);
   });

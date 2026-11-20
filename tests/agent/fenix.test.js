@@ -22,9 +22,8 @@ mock.module('@anthropic-ai/claude-agent-sdk', {
   },
 });
 
-const { AGENT_TIMEOUT_MESSAGE, THREAD_BUSY_MESSAGE, buildPrompt, runFenixAgent, usageFromResult } = await import(
-  '../../agent/fenix.js'
-);
+const { AGENT_TIMEOUT_MESSAGE, THREAD_BUSY_MESSAGE, buildPrompt, runFenixAgent, sinceLastReply, usageFromResult } =
+  await import('../../agent/fenix.js');
 
 const deps = (thread) => ({
   client: {},
@@ -130,5 +129,61 @@ describe('buildPrompt', () => {
     const [image, text] = messages[0].message.content;
     assert.deepStrictEqual(image, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } });
     assert.deepStrictEqual(text, { type: 'text', text: '[Sent Tue, 17 Nov 2026, 17:05 UTC]\nsee this' });
+  });
+});
+
+// Running totals of a real resumed thread (usage log, 17 Nov): its first reply, then the second one,
+// whose result also carried the first. Haiku did not run again, so its figures stay the same.
+const opus = (input, cacheWrite, cacheRead, output, costUsd) => ({ input, output, cacheRead, cacheWrite, costUsd });
+const haiku = { input: 1335, output: 358, cacheRead: 0, cacheWrite: 0, costUsd: 0.0031 };
+const first = {
+  models: { 'claude-opus-5-5': opus(12, 24365, 85758, 2777, 0.195), 'claude-haiku-5-5': haiku },
+  costUsd: 0.1981,
+};
+const second = {
+  models: { 'claude-opus-5-5': opus(34, 58095, 437750, 6322, 0.505), 'claude-haiku-5-5': haiku },
+  costUsd: 0.5081,
+};
+
+describe('sinceLastReply', () => {
+  it("logs a resumed reply with its own usage, without the thread's earlier replies", () => {
+    const own = sinceLastReply(second, first);
+    assert.deepStrictEqual(Object.keys(own.models), ['claude-opus-5-5']);
+    const o = own.models['claude-opus-5-5'];
+    assert.deepStrictEqual([o.input, o.cacheWrite, o.cacheRead, o.output], [22, 33730, 351992, 3545]);
+    assert.ok(Math.abs(o.costUsd - 0.31) < 1e-9);
+    assert.ok(Math.abs(own.costUsd - 0.31) < 1e-9);
+  });
+
+  it('keeps the totals of a new thread, or of totals that restarted', () => {
+    assert.strictEqual(sinceLastReply(first, null), first);
+    assert.strictEqual(sinceLastReply(first, second), first);
+  });
+});
+
+describe('runFenixAgent budgets', () => {
+  it('refuses a long thread before calling the model, and still lets an owner continue it', async () => {
+    const calls = seenOptions.length;
+    const thread = { models: {}, costUsd: 2.5 };
+    const allowed = { ...deps('20.0'), userId: 'U0ALLOWED', userName: 'Allowed' };
+    const refused = await runFenixAgent('more', 'sess-1', allowed, { threadTotals: thread });
+    assert.strictEqual(refused.usage.outcome, 'budget');
+    assert.strictEqual(refused.usage.error, 'budget_thread');
+    assert.match(refused.responseText, /This thread has cost \$2\.50/);
+    assert.strictEqual(refused.sessionId, null);
+    assert.strictEqual(seenOptions.length, calls);
+
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const owner = runFenixAgent('more', 'sess-2', deps('21.0'), { threadTotals: thread });
+      await new Promise((r) => setImmediate(r));
+      assert.strictEqual(seenOptions.length, calls + 1);
+      assert.strictEqual(seenOptions.at(-1).maxBudgetUsd, 1);
+      assert.strictEqual(seenOptions.at(-1).resume, 'sess-2');
+      mock.timers.tick(120_000);
+      await owner;
+    } finally {
+      mock.timers.reset();
+    }
   });
 });

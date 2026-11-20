@@ -13,8 +13,15 @@ import {
   feedbackStats,
   listFeedback,
 } from '../utils/feedback-store.js';
-import { textResult } from '../utils/helpers.js';
+import { money, textResult } from '../utils/helpers.js';
 import { isOwner } from '../utils/input-guard.js';
+import {
+  apiLimitMessage,
+  apiLimitReached,
+  checkBudget,
+  notifyApiLimitReached,
+  notifyBudgetReached,
+} from '../utils/usage-budget.js';
 import { recordUsage } from '../utils/usage-store.js';
 import { createIgnoreHostsTool } from './tools/grafana.js';
 import { ALL_TOOLS } from './tools/index.js';
@@ -25,6 +32,9 @@ const AGENT_TIMEOUT_MS = 120_000;
 const AGENT_BUSY_MESSAGE = "I'm handling several requests right now. Try again in a moment.";
 export const THREAD_BUSY_MESSAGE = "I'm still working on your previous message in this thread. I'll answer it first.";
 export const AGENT_TIMEOUT_MESSAGE = `That took longer than ${AGENT_TIMEOUT_MS / 60_000} minutes, so I stopped. Try a narrower question, or ask again in a moment.`;
+/** @param {number} cap */
+export const replyBudgetMessage = (cap) =>
+  `I stopped here because this answer reached its spending limit (${money(cap)}). Ask a narrower question, or split it into smaller ones.`;
 const MCP_PREFIX = 'mcp__fenix-tools__';
 let activeAgents = 0;
 const threadLocks = new Set();
@@ -281,6 +291,46 @@ export function usageFromResult(result) {
   };
 }
 
+/** Below this, a difference between two cost or token figures is rounding, not spend. */
+const EPSILON = 1e-9;
+
+/**
+ * This reply's own usage. The SDK reports a resumed session's usage as the running total of the whole
+ * thread (its result docs: the first result "already carries the earlier turns"), so the thread's totals
+ * after the previous reply are subtracted. If any figure went down, the totals were restarted, and the
+ * result is this reply's alone. Models with no new usage are left out.
+ * @param {import('../thread-context/store.js').ThreadTotals} total - From this reply's result
+ * @param {import('../thread-context/store.js').ThreadTotals | null} previous - After the thread's previous reply
+ * @returns {import('../thread-context/store.js').ThreadTotals}
+ */
+export function sinceLastReply(total, previous) {
+  if (!previous) return total;
+  const costUsd = total.costUsd - previous.costUsd;
+  const restarted =
+    costUsd < -EPSILON || Object.keys(previous.models).some((m) => !(m in total.models) && previous.models[m].costUsd);
+  if (restarted) return total;
+  /** @type {Record<string, import('../utils/usage-store.js').ModelTokens>} */
+  const models = {};
+  for (const [model, t] of Object.entries(total.models)) {
+    const p = previous.models[model] || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
+    const d = {
+      input: t.input - p.input,
+      output: t.output - p.output,
+      cacheRead: t.cacheRead - p.cacheRead,
+      cacheWrite: t.cacheWrite - p.cacheWrite,
+      costUsd: t.costUsd - p.costUsd,
+    };
+    const values = Object.values(d);
+    if (values.some((v) => v < -EPSILON)) return total;
+    if (values.some((v) => v > EPSILON)) {
+      models[model] = /** @type {import('../utils/usage-store.js').ModelTokens} */ (
+        Object.fromEntries(Object.entries(d).map(([k, v]) => [k, Math.max(0, v)]))
+      );
+    }
+  }
+  return { models, costUsd: Math.max(0, costUsd) };
+}
+
 /**
  * The prompt for one user message: stamped with the time it was sent (so "yesterday" and times in
  * screenshots can be resolved; kept out of the system prompt so that stays cacheable), plus any images.
@@ -322,10 +372,13 @@ export function buildPrompt(text, images, nowSec = Date.now() / 1000) {
  * @param {string} text - The user's message text.
  * @param {string | undefined} sessionId - An existing session ID to resume the thread's conversation.
  * @param {FenixDeps} deps - Slack context for the thread; Slack-bound tools close over it.
- * @param {{ images?: import('../utils/slack.js').SlackImage[] }} [input] - Images attached to the message
- * @returns {Promise<{ responseText: string, sessionId: string | null, usage: import('../utils/usage-store.js').UsageRecord }>}
+ * @param {{ images?: import('../utils/slack.js').SlackImage[], threadTotals?: import('../thread-context/store.js').ThreadTotals | null }} [input]
+ *   images: attached to the message. threadTotals: the resumed session's running totals after its previous reply
+ *   (from the session store), so this reply is logged with its own cost and the thread limit can be checked.
+ * @returns {Promise<{ responseText: string, sessionId: string | null, usage: import('../utils/usage-store.js').UsageRecord, threadTotals: import('../thread-context/store.js').ThreadTotals | null }>}
+ *   threadTotals: the session's running totals after this reply, to store with the session (null when it did not run)
  */
-export async function runFenixAgent(text, sessionId, deps, { images = [] } = {}) {
+export async function runFenixAgent(text, sessionId, deps, { images = [], threadTotals = null } = {}) {
   const startedAt = Date.now();
   /**
    * @param {import('../utils/usage-store.js').UsageRecord['outcome']} outcome
@@ -354,9 +407,24 @@ export async function runFenixAgent(text, sessionId, deps, { images = [] } = {})
 
   // Reject before doing any work: one run per thread, and a global cap
   const key = threadKey(deps.channelId, deps.threadTs);
-  if (threadLocks.has(key)) return { responseText: THREAD_BUSY_MESSAGE, sessionId: null, usage: record('busy') };
+  if (threadLocks.has(key)) {
+    return { responseText: THREAD_BUSY_MESSAGE, sessionId: null, usage: record('busy'), threadTotals: null };
+  }
   if (activeAgents >= MAX_CONCURRENT_AGENTS) {
-    return { responseText: AGENT_BUSY_MESSAGE, sessionId: null, usage: record('busy') };
+    return { responseText: AGENT_BUSY_MESSAGE, sessionId: null, usage: record('busy'), threadTotals: null };
+  }
+
+  // Spending limits, from the in-memory usage totals (no tokens spent on a refusal)
+  const previous = sessionId ? threadTotals : null;
+  const budget = checkBudget(deps.userId, previous?.costUsd ?? 0);
+  if (!budget.ok) {
+    void notifyBudgetReached(deps.client, { userId: deps.userId, userName: deps.userName, limit: budget.limit });
+    return {
+      responseText: budget.reply,
+      sessionId: null,
+      usage: record('budget', { error: `budget_${budget.limit}` }),
+      threadTotals: null,
+    };
   }
 
   // Closure-based tools that need deps for Slack API access
@@ -519,6 +587,8 @@ export async function runFenixAgent(text, sessionId, deps, { images = [] } = {})
     disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'WebSearch'],
     permissionMode: 'bypassPermissions',
     maxTurns: 15,
+    // Counts only this reply's spend, even in a resumed session
+    ...(budget.maxUsd !== undefined && { maxBudgetUsd: budget.maxUsd }),
     settingSources: [],
     ...(sessionId && { resume: sessionId }),
   };
@@ -533,6 +603,21 @@ export async function runFenixAgent(text, sessionId, deps, { images = [] } = {})
 
   /** @type {Record<string, number>} */
   const tools = {};
+  /**
+   * The reply when the Anthropic account's usage limit refused the run, else null.
+   * @param {string | undefined} errorText
+   */
+  const apiLimitReply = (errorText) => {
+    const limit = apiLimitReached(errorText);
+    if (!limit) return null;
+    void notifyApiLimitReached(deps.client, limit.until);
+    return {
+      responseText: apiLimitMessage(limit.until),
+      sessionId: null,
+      usage: record('error', { tools, error: 'api_usage_limit' }),
+      threadTotals: null,
+    };
+  };
   try {
     const responseParts = [];
     let newSessionId = null;
@@ -557,17 +642,40 @@ export async function runFenixAgent(text, sessionId, deps, { images = [] } = {})
       }
     }
 
-    const responseText = responseParts.join('\n');
+    if (result?.is_error) {
+      const refused = apiLimitReply([result.result, ...(result.errors || [])].join('\n'));
+      if (refused) return refused;
+    }
+
+    // The reply cap that stopped this run, if one did
+    const stoppedAt = result?.subtype === 'error_max_budget_usd' ? budget.maxUsd : undefined;
+    const responseText = [...responseParts, ...(stoppedAt !== undefined ? [replyBudgetMessage(stoppedAt)] : [])].join(
+      '\n',
+    );
+    const total = usageFromResult(result);
     const usage = record(result?.is_error ? 'error' : 'ok', {
-      ...usageFromResult(result),
+      ...total,
+      ...sinceLastReply(total, previous),
       tools,
       ...(result?.is_error && { error: result.subtype }),
     });
-    return { responseText, sessionId: newSessionId, usage };
+    return {
+      responseText,
+      sessionId: newSessionId,
+      usage,
+      threadTotals: result ? { models: total.models, costUsd: total.costUsd } : null,
+    };
   } catch (e) {
     if (ac.signal.aborted) {
-      return { responseText: AGENT_TIMEOUT_MESSAGE, sessionId: null, usage: record('timeout', { tools }) };
+      return {
+        responseText: AGENT_TIMEOUT_MESSAGE,
+        sessionId: null,
+        usage: record('timeout', { tools }),
+        threadTotals: null,
+      };
     }
+    const refused = apiLimitReply(/** @type {any} */ (e)?.message);
+    if (refused) return refused;
     record('error', { tools, error: String(/** @type {any} */ (e)?.name || 'Error') });
     throw e;
   } finally {

@@ -27,9 +27,23 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {{ enabled: boolean, host: string, port: number, path: string, publicUrl: string | null, oauthRedirectUris: string[], cimdOrigins: string[], maxUploadMb: number, maxUploadTotalMb: number }} mcp
  *   MCP server (read-only tools). Static bearer FENIX_MCP_TOKEN for Claude Code; OAuth with Slack approval for
  *   Claude app connectors when publicUrl is set (only redirect URIs listed in oauthRedirectUris may register).
- * @property {{ retentionMonths: number }} usage - Agent usage log: monthly files kept for this many months
+ * @property {{ retentionMonths: number, budgets: UsageBudgets }} usage - Agent usage log: monthly files kept for this
+ *   many months, and the spending limits checked before each agent reply
  * @property {string} timeZone - IANA time zone for times shown in Slack (alerts use it too)
  * @property {string} dataDir - Directory for persisted state (feedback, failure log), relative to the project root
+ */
+
+/**
+ * Spending limits in USD (the SDK's cost estimates). Owners are never blocked; everyone else is checked before each
+ * reply. Set a limit to null to turn it off.
+ * @typedef {Object} UsageBudgets
+ * @property {number | null} userDailyUsd - Per person per day (in timeZone)
+ * @property {number | null} userMonthlyUsd - Per person per calendar month (UTC, like the usage log)
+ * @property {number | null} teamMonthlyUsd - Everyone except owners together, per month
+ * @property {number | null} replyMaxUsd - Most one reply may cost; also applies to owners
+ * @property {number | null} threadMaxUsd - A thread that has cost this much asks for a new thread
+ * @property {number} warnAt - Share of a limit (0-1) from which the reply footer shows what is left
+ * @property {Record<string, { dailyUsd?: number | null, monthlyUsd?: number | null }>} perUser - Slack user ID -> own limits
  */
 
 /** @type {FenixConfig} */
@@ -45,7 +59,18 @@ const DEFAULTS = {
   grafana: { url: null, botId: null, prometheusUid: null, lokiUid: null, replyMode: 'dm', ignoreHosts: [] },
   contextFile: 'prompts/context.local.md',
   dataDir: 'data',
-  usage: { retentionMonths: 12 },
+  usage: {
+    retentionMonths: 12,
+    budgets: {
+      userDailyUsd: 3,
+      userMonthlyUsd: 30,
+      teamMonthlyUsd: 100,
+      replyMaxUsd: 1,
+      threadMaxUsd: 2,
+      warnAt: 0.8,
+      perUser: {},
+    },
+  },
   mcp: {
     enabled: false,
     host: '127.0.0.1',
@@ -78,7 +103,11 @@ function loadConfig() {
     gitlab: { ...DEFAULTS.gitlab, ...file.gitlab },
     youtrack: { ...DEFAULTS.youtrack, ...file.youtrack },
     grafana: { ...DEFAULTS.grafana, ...file.grafana },
-    usage: { ...DEFAULTS.usage, ...file.usage },
+    usage: {
+      ...DEFAULTS.usage,
+      ...file.usage,
+      budgets: { ...DEFAULTS.usage.budgets, ...file.usage?.budgets },
+    },
     mcp: { ...DEFAULTS.mcp, ...file.mcp },
   };
 }
