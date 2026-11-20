@@ -51,6 +51,11 @@ describe('limitsFor', () => {
     assert.deepStrictEqual(limitsFor('U0ALLOWED'), defaults);
     assert.deepStrictEqual(limitsFor('U0BIG'), { dailyUsd: 10, monthlyUsd: null });
   });
+
+  it('applies an own entry through its until day, then the defaults again', () => {
+    assert.deepStrictEqual(limitsFor('U0UNTIL', new Date('2026-11-30T23:00:00Z')), { dailyUsd: 5, monthlyUsd: 30 });
+    assert.deepStrictEqual(limitsFor('U0UNTIL', new Date('2026-12-01T00:30:00Z')), defaults);
+  });
 });
 
 describe('evaluateBudget', () => {
@@ -135,7 +140,7 @@ describe('notifyBudgetReached', () => {
     assert.strictEqual(postMessage.mock.callCount(), 2);
     const { channel, text } = postMessage.mock.calls[0].arguments[0];
     assert.strictEqual(channel, 'D0ADMIN');
-    assert.match(text, /Dana reached their daily Fenix budget \(\$3\.00\).*perUser\["U0NOTIFY"\]/);
+    assert.match(text, /Dana reached their daily Fenix budget \(\$3\.00\).*reply here with `limit <@U0NOTIFY> 5\/day`/);
   });
 
   it('sends nothing for the thread limit', async () => {

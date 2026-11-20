@@ -66,6 +66,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 
 | Command | Who | Effect |
 |---|---|---|
+| `limits` / `limit @name 5/day [50/month] [until end of month]` / `limit @name reset` (DM, or after `@Fenix`) | Owners | Show everyone's spending limits and spend, or change one person's (see *Budgets*). Run in code, so it works even while the API credits are used up. |
 | `report [period]` (DM) / `@Fenix report [period]` | Owners | Full usage report: replies, tokens, cost, cache share, per-reply averages and p50/p95 time, by model, user, day and tool, costliest replies, and rule-based analyses. Period: `7d`, `24h`, `last-month`, `2026-10`; default this month. Built in code, so it costs no AI tokens. |
 | `@Fenix delete` | Owners | Deletes every message Fenix posted in the current thread (parent included, if Fenix posted it), then confirms privately. Anyone else is ignored silently. |
 
@@ -270,7 +271,22 @@ check costs no tokens. Owners are never refused. Everyone else has:
 | `threadMaxUsd` | $2 per thread | Fenix asks for a new thread, since every reply in a long thread re-reads all of it |
 | `replyMaxUsd` | $1 per reply, owners included | The SDK stops the reply (`maxBudgetUsd`) and Fenix says why; it is also capped at what is left of the person's budgets, but never below $0.10 |
 
-`perUser` gives a person their own `dailyUsd` / `monthlyUsd`, and `null` turns a limit off. From `warnAt` (80%)
+`perUser` gives a person their own `dailyUsd` / `monthlyUsd`, and `null` turns a limit off. An optional `until`
+(`"2026-11-30"`, in `timeZone`) is the last day those apply; after it the defaults do again.
+
+Owners can also change a person's limits without a deploy, in two ways that share the same code
+(`utils/budget-limits.js`) and store (`data/budget-overrides.json`, which deploys never overwrite):
+
+- **Ask Fenix**, e.g. "raise Dana's daily limit to $5 for this month" (the owner-only `budget_limits` tool).
+- **Send a command**, which costs no tokens and so also works while the API credits are used up:
+  `limits`, `limit @Dana 5/day`, `limit @Dana 50/month until end of month`, `limit @Dana reset`.
+  A bare amount is a daily limit; `until` takes a day (`2026-11-30`) or `end of month`.
+
+A limit set this way wins over the person's `perUser` entry, field by field, until its `until` day; `reset` removes
+it. People are found by mention, user ID or part of their name on the access list; owners have no limits. The DM
+the owners get when someone reaches a limit includes the command to raise it.
+
+From `warnAt` (80%)
 of a limit, the reply footer shows what is left, e.g. `⏳ budget today: $2.50 of $3.00`. A refused request is
 logged with the outcome `budget`. The costs are the SDK's estimates; the Claude Console's spend limit for the API
 key's workspace is the hard stop if Fenix ever gets it wrong.
@@ -477,7 +493,7 @@ cp fenix.config.example.json fenix.config.json
 | `mcp.publicUrl` / `mcp.oauthRedirectUris` / `mcp.cimdOrigins` | Public HTTPS origin of the endpoint, which turns on OAuth sign-in for Claude app connectors; the callback URLs clients may register; and the origins whose client metadata documents may be fetched (defaults: Claude's). |
 | `mcp.maxUploadMb` / `mcp.maxUploadTotalMb` | Largest image or video an MCP client may upload for `slack_send_message` (default 200 MB), and the total held on disk at once (default 1024 MB). |
 | `usage.retentionMonths` | Months of usage logs to keep (default 12). |
-| `usage.budgets` | Spending limits for people other than owners, and per reply: `userDailyUsd`, `userMonthlyUsd`, `teamMonthlyUsd`, `threadMaxUsd`, `replyMaxUsd`, `warnAt`, and `perUser` (Slack ID → own `dailyUsd` / `monthlyUsd`). See *Budgets*. |
+| `usage.budgets` | Spending limits for people other than owners, and per reply: `userDailyUsd`, `userMonthlyUsd`, `teamMonthlyUsd`, `threadMaxUsd`, `replyMaxUsd`, `warnAt`, and `perUser` (Slack ID → own `dailyUsd` / `monthlyUsd`, optionally `until` a day). See *Budgets*. |
 | `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |
 | `dataDir` | Directory for persisted state: feedback and the failure log (default `data`). |

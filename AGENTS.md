@@ -106,7 +106,7 @@ Every run is recorded through `utils/usage-store.js`: `runFenixAgent()` records 
 
 The SDK reports a resumed session's usage as the running total of the whole thread, so the session store keeps each thread's totals (`setSession(…, totals)`) and `sinceLastReply()` logs a reply with its own cost; never record `total_cost_usd` of a resumed run directly.
 
-Budgets (`utils/usage-budget.js`, `config.usage.budgets`) are checked in `runFenixAgent()` before the model is called, from the in-memory per-person totals (`spendByUser()`), and each reply is capped with the SDK's `maxBudgetUsd`. Owners are never refused. Refusals reply in code and are logged with the outcome `budget`.
+Budgets (`utils/usage-budget.js`, `config.usage.budgets`) are checked in `runFenixAgent()` before the model is called, from the in-memory per-person totals (`spendByUser()`), and each reply is capped with the SDK's `maxBudgetUsd`. Owners are never refused. Refusals reply in code and are logged with the outcome `budget`. Owners change a person's limits through `utils/budget-limits.js` only, used by both the `budget_limits` tool (owner-only) and the `limit` command (`listeners/events/budget-limit-command.js`, no tokens); those limits live in `data/budget-overrides.json` and win over `perUser`, field by field, until their `until` day.
 
 ### MCP Endpoint
 

@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { budgetOverrides } from './budget-overrides-store.js';
 import { money } from './helpers.js';
 import { isOwner } from './input-guard.js';
 import { localDay, monthKey, spendByUser } from './usage-store.js';
@@ -19,17 +20,45 @@ export const MIN_REPLY_USD = 0.1;
  */
 
 /**
- * A person's daily and monthly limits: their own entry in perUser, else the defaults.
+ * An entry of perUser or of the overrides store while it applies (through its `until` day), else none.
+ * @template {{ until?: string }} T
+ * @param {T | undefined} entry
+ * @param {Date} now
+ * @returns {T | undefined}
+ */
+const activeEntry = (entry, now) => (entry && !(entry.until && localDay(now) > entry.until) ? entry : undefined);
+
+/**
+ * Where a person's limits come from right now: a limit an owner set by asking (overrides store), else their
+ * entry in fenix.config.json (perUser), else the defaults.
  * @param {string} userId
+ * @param {Date} [now]
+ * @returns {{ source: 'asked' | 'config' | 'default', until?: string, setBy?: string, setAt?: string }}
+ */
+export function limitSource(userId, now = new Date()) {
+  const asked = activeEntry(budgetOverrides()[userId], now);
+  if (asked) return { source: 'asked', until: asked.until, setBy: asked.setBy, setAt: asked.setAt };
+  const fromConfig = activeEntry(config.usage.budgets.perUser[userId], now);
+  if (fromConfig) return { source: 'config', until: fromConfig.until };
+  return { source: 'default' };
+}
+
+/**
+ * A person's daily and monthly limits, field by field: a limit an owner set by asking, else their entry in
+ * perUser, else the defaults. Entries apply through their `until` day.
+ * @param {string} userId
+ * @param {Date} [now]
  * @returns {{ dailyUsd: number | null, monthlyUsd: number | null }}
  */
-export function limitsFor(userId) {
+export function limitsFor(userId, now = new Date()) {
   const b = config.usage.budgets;
-  const own = b.perUser[userId] || {};
-  return {
-    dailyUsd: own.dailyUsd !== undefined ? own.dailyUsd : b.userDailyUsd,
-    monthlyUsd: own.monthlyUsd !== undefined ? own.monthlyUsd : b.userMonthlyUsd,
+  const layers = [activeEntry(budgetOverrides()[userId], now), activeEntry(b.perUser[userId], now)];
+  /** @param {'dailyUsd' | 'monthlyUsd'} key @param {number | null} fallback */
+  const pick = (key, fallback) => {
+    for (const layer of layers) if (layer && layer[key] !== undefined) return /** @type {number | null} */ (layer[key]);
+    return fallback;
   };
+  return { dailyUsd: pick('dailyUsd', b.userDailyUsd), monthlyUsd: pick('monthlyUsd', b.userMonthlyUsd) };
 }
 
 /**
@@ -208,7 +237,8 @@ export async function notifyBudgetReached(client, { userId, userName, limit }, n
       : `:money_with_wings: ${userName} reached their ${limit} Fenix budget ` +
         `(${money(/** @type {number} */ (limit === 'daily' ? limits.dailyUsd : limits.monthlyUsd))}). ` +
         `Their replies stop until ${limit === 'daily' ? `midnight (${config.timeZone})` : nextMonthLabel(now)}. ` +
-        `To raise it, set usage.budgets.perUser["${userId}"] in fenix.config.json and deploy.`;
+        `To raise it, reply here with \`limit <@${userId}> ${limit === 'daily' ? '5/day' : '50/month'}\` ` +
+        '(add `until end of month` to make it temporary), or ask me.';
   return noticeOnce(client, key, text);
 }
 

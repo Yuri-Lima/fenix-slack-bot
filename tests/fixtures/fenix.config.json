@@ -47,6 +47,10 @@
         "U0BIG": {
           "dailyUsd": 10,
           "monthlyUsd": null
+        },
+        "U0UNTIL": {
+          "dailyUsd": 5,
+          "until": "2026-11-30"
         }
       }
     }

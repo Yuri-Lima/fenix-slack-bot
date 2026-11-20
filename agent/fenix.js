@@ -15,6 +15,7 @@ import {
 } from '../utils/feedback-store.js';
 import { money, textResult } from '../utils/helpers.js';
 import { isOwner } from '../utils/input-guard.js';
+import { resolveUserName } from '../utils/slack.js';
 import {
   apiLimitMessage,
   apiLimitReached,
@@ -25,7 +26,7 @@ import {
 import { recordUsage } from '../utils/usage-store.js';
 import { createIgnoreHostsTool } from './tools/grafana.js';
 import { ALL_TOOLS } from './tools/index.js';
-import { usageReportTool } from './tools/usage.js';
+import { createBudgetLimitsTool, usageReportTool } from './tools/usage.js';
 
 const MAX_CONCURRENT_AGENTS = 3;
 const AGENT_TIMEOUT_MS = 120_000;
@@ -566,6 +567,10 @@ export async function runFenixAgent(text, sessionId, deps, { images = [], thread
       feedbackStatsTool,
       usageReportTool,
       createIgnoreHostsTool(() => deps.userName || deps.userId),
+      createBudgetLimitsTool(
+        () => deps.userName || deps.userId,
+        (id) => resolveUserName(deps.client, id),
+      ),
     );
   }
 

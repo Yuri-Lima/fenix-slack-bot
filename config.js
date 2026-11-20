@@ -43,7 +43,8 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {number | null} replyMaxUsd - Most one reply may cost; also applies to owners
  * @property {number | null} threadMaxUsd - A thread that has cost this much asks for a new thread
  * @property {number} warnAt - Share of a limit (0-1) from which the reply footer shows what is left
- * @property {Record<string, { dailyUsd?: number | null, monthlyUsd?: number | null }>} perUser - Slack user ID -> own limits
+ * @property {Record<string, { dailyUsd?: number | null, monthlyUsd?: number | null, until?: string }>} perUser - Slack user
+ *   ID -> own limits; `until` ("YYYY-MM-DD", in timeZone) is the last day they apply, after which the defaults do
  */
 
 /** @type {FenixConfig} */

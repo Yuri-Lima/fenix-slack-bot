@@ -2,6 +2,7 @@ import { sessionStore } from '../../thread-context/index.js';
 import { GENERIC_ERROR_MESSAGE, gateRequest, isOwner } from '../../utils/input-guard.js';
 import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
+import { handleLimitCommand, parseLimitCommand } from './budget-limit-command.js';
 import { handleDeleteCommand, isDeleteCommand } from './delete-thread.js';
 import { handleReportCommand, parseReportCommand } from './usage-report-command.js';
 
@@ -33,6 +34,15 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     if (reportPeriod !== null) {
       if (!isOwner(userId)) return;
       await handleReportCommand({ client, channel: channelId, threadTs, periodArg: reportPeriod });
+      return;
+    }
+
+    // `@Fenix limit @name 5/day`: spending limits, changed in code (no AI tokens). Owner-only. Only Fenix's
+    // own mention is removed, so the person's mention stays in the command.
+    const limitCommand = parseLimitCommand(text.replaceAll(`<@${context.botUserId}>`, '').trim());
+    if (limitCommand && isOwner(userId)) {
+      const actor = await resolveUserName(client, userId);
+      await handleLimitCommand({ client, channel: channelId, threadTs, command: limitCommand, actor });
       return;
     }
 

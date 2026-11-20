@@ -3,6 +3,7 @@ import { sessionStore } from '../../thread-context/index.js';
 import { GENERIC_ERROR_MESSAGE, gateRequest, isAllowed, isOwner } from '../../utils/input-guard.js';
 import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
+import { handleLimitCommand, parseLimitCommand } from './budget-limit-command.js';
 import { handleReportCommand, parseReportCommand } from './usage-report-command.js';
 
 /**
@@ -80,6 +81,14 @@ export async function handleMessage({ client, context, event, logger, say, saySt
   const reportPeriod = parseReportCommand(text);
   if (reportPeriod !== null && isOwner(userId)) {
     await handleReportCommand({ client, channel: event.channel, threadTs, periodArg: reportPeriod });
+    return;
+  }
+
+  // `limits` / `limit @name 5/day`: spending limits, changed in code (no AI tokens). Owner-only
+  const limitCommand = parseLimitCommand(text);
+  if (limitCommand && isOwner(userId)) {
+    const actor = await resolveUserName(client, userId);
+    await handleLimitCommand({ client, channel: event.channel, threadTs, command: limitCommand, actor });
     return;
   }
 
