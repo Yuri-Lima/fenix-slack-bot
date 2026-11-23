@@ -6,6 +6,7 @@ import {
   diagnose,
   evidenceFields,
   ignoredBy,
+  serverOf,
   VERDICT_STATUS,
 } from '../../integrations/host-health.js';
 import { andMore } from '../../utils/helpers.js';
@@ -116,7 +117,7 @@ export function parseGrafanaAlert(message) {
  * @returns {string}
  */
 export function targetHost(entry) {
-  return entry.labels.monitor_name || entry.labels.server_name || entry.hosts[0].replace(/-health-exporter$/, '');
+  return entry.labels.monitor_name || entry.labels.server_name || serverOf(entry.hosts[0]);
 }
 
 /**

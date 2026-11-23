@@ -64,24 +64,47 @@ export const q = (value) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 export const re = (value) => q(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 
 /**
+ * The server a host name stands for: alerts name the health exporter ("alpha-health-exporter") for server "alpha".
+ * @param {string} host
+ * @returns {string}
+ */
+export const serverOf = (host) => host.replace(/-health-exporter$/, '');
+
+/**
  * Every server name part excluded from analysis, lowercase: `grafana.ignoreHosts` from fenix.config.json
- * plus the ones owners added by asking Fenix (utils/ignore-hosts-store.js).
+ * plus the ones owners added by asking Fenix (utils/ignore-hosts-store.js), except exact names.
  * @returns {string[]}
  */
 export function ignoreHostParts() {
-  const parts = [...config.grafana.ignoreHosts, ...addedIgnoreParts().map((a) => a.part)];
+  const parts = [
+    ...config.grafana.ignoreHosts,
+    ...addedIgnoreParts()
+      .filter((a) => !a.exact)
+      .map((a) => a.part),
+  ];
   return [...new Set(parts.map((p) => String(p).toLowerCase()).filter(Boolean))];
 }
 
 /**
- * The name part that excludes a host from analysis (case-insensitive), e.g. "test" for test servers,
- * or null when the host is analysed.
+ * Server names owners excluded exactly (only that server, not names containing it), lowercase.
+ * @returns {string[]}
+ */
+export function ignoreHostNames() {
+  return addedIgnoreParts()
+    .filter((a) => a.exact)
+    .map((a) => a.part);
+}
+
+/**
+ * What excludes a host from analysis (case-insensitive): an exact server name, or a name part such as "test"
+ * for test servers; null when the host is analysed.
  * @param {string} host
  * @returns {string | null}
  */
 export function ignoredBy(host) {
   const name = host.toLowerCase();
-  return ignoreHostParts().find((part) => name.includes(part)) ?? null;
+  const server = serverOf(name);
+  return ignoreHostNames().find((n) => n === server) ?? ignoreHostParts().find((part) => name.includes(part)) ?? null;
 }
 
 /**
@@ -90,7 +113,11 @@ export function ignoredBy(host) {
  * @returns {string}
  */
 export function ignoredHostMessage(host) {
-  return `${host} is not analysed: server names containing "${ignoredBy(host)}" are excluded from analysis. Tell the user.`;
+  const by = ignoredBy(host);
+  const entry = addedIgnoreParts().find((a) => a.part === by);
+  const ends = entry?.until ? ` until ${endLabel(new Date(entry.until))}` : '';
+  const why = entry?.exact ? 'this server is' : `server names containing "${by}" are`;
+  return `${host} is not analysed: ${why} excluded from analysis${ends}. Tell the user.`;
 }
 
 /** Hosts that sent logs within this window can be found by name. */
@@ -753,6 +780,18 @@ export function dayLabel(sec, { year = false } = {}) {
     ...(year && { year: 'numeric' }),
     timeZone: config.timeZone,
   });
+}
+
+/**
+ * When something ends, in the configured time zone: "Tue 24 Nov 18:00 (Europe/Berlin)", or
+ * "the end of Mon 23 Nov (Europe/Berlin)" for midnight.
+ * @param {Date} end
+ * @returns {string}
+ */
+export function endLabel(end) {
+  const sec = Math.floor(end.getTime() / 1000);
+  const at = clock(sec) === '00:00' ? `the end of ${dayLabel(sec - 1)}` : `${dayLabel(sec)} ${clock(sec)}`;
+  return `${at} (${config.timeZone})`;
 }
 
 /**

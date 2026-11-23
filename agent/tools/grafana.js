@@ -7,14 +7,17 @@ import {
   collectHostEvidence,
   dayLabel,
   diagnose,
+  endLabel,
   evidenceFields,
   ignoredBy,
   ignoredHostMessage,
+  ignoreHostNames,
   ignoreHostParts,
   lastSeenWithin,
   logHosts,
   notableKinds,
   parseLocalTime,
+  serverOf,
   VERDICT_STATUS,
 } from '../../integrations/host-health.js';
 import { formatHostLogs, MAX_LOG_MINUTES, readHostLogs, resolveLogHost } from '../../integrations/host-logs.js';
@@ -159,23 +162,85 @@ export const hostLogsTool = tool(
 const NAME_PART = /^[a-z0-9][a-z0-9._-]{1,62}$/;
 
 /**
- * Servers currently sending logs whose names contain `part`, or null when Grafana cannot be asked.
- * @param {string} part
- * @returns {Promise<{ matches: string[], known: number } | null>}
+ * @typedef {Object} ServerMatches
+ * @property {string[]} matches - servers sending logs that the entry excludes
+ * @property {string[]} similar - for an exact name, other servers whose names contain it (left analysed)
+ * @property {number} known - how many servers send logs
  */
-async function serversMatching(part) {
+
+/**
+ * Servers currently sending logs that `part` excludes (by name part, or the one server named exactly `part`),
+ * or null when Grafana cannot be asked.
+ * @param {string} part
+ * @param {boolean} exact
+ * @returns {Promise<ServerMatches | null>}
+ */
+async function serversMatching(part, exact) {
   const known = await logHosts().catch(() => null);
   if (!known) return null;
-  return { matches: known.filter((h) => h.toLowerCase().includes(part)).sort(), known: known.length };
+  const containing = known.filter((h) => h.toLowerCase().includes(part)).sort();
+  if (!exact) return { matches: containing, similar: [], known: known.length };
+  const named = (/** @type {string} */ h) => serverOf(h.toLowerCase()) === part;
+  return { matches: containing.filter(named), similar: containing.filter((h) => !named(h)), known: known.length };
 }
 
-/** @param {{ matches: string[], known: number } | null} found */
-const matchSummary = (found) =>
-  !found
-    ? 'Could not check which servers it matches (Grafana unavailable).'
-    : found.matches.length
-      ? `Matches ${found.matches.length} of ${found.known} servers sending logs: ${found.matches.join(', ')}.`
-      : 'No server sending logs right now matches it; it applies to matching servers from now on.';
+/**
+ * @param {ServerMatches | null} found
+ * @param {boolean} exact
+ */
+const matchSummary = (found, exact) => {
+  if (!found) return 'Could not check which servers it matches (Grafana unavailable).';
+  if (exact) {
+    const which = found.matches.length
+      ? `Matches ${found.matches.join(', ')}.`
+      : 'No server sending logs right now has exactly this name; it applies if one appears.';
+    return found.similar.length ? `${which} Still analysed: ${found.similar.join(', ')}.` : which;
+  }
+  return found.matches.length
+    ? `Matches ${found.matches.length} of ${found.known} servers sending logs: ${found.matches.join(', ')}.`
+    : 'No server sending logs right now matches it; it applies to matching servers from now on.';
+};
+
+const DURATION = /^(\d{1,3})\s*(h|d|w|mo)$/;
+/** @type {Record<string, number>} */
+const UNIT_MS = { h: 3600_000, d: 86_400_000, w: 7 * 86_400_000 };
+const DAY = /^(\d{4})-(\d\d)-(\d\d)$/;
+
+/**
+ * When an exclusion ends, from a duration ("4h", "1d", "2w", "1mo", "always") or an end ("2026-11-23" means
+ * through the end of that day, or "2026-11-23 18:00"), in config.timeZone. Neither means until removed.
+ * @param {{ duration?: string, until?: string }} spec
+ * @param {Date} [now]
+ * @returns {{ until: Date | null } | { error: string }}
+ */
+export function ignoreEnd({ duration, until }, now = new Date()) {
+  const d = (duration || '').trim().toLowerCase();
+  const u = (until || '').trim();
+  if (d && u) return { error: 'Give `duration` or `until`, not both.' };
+  if (!u && (!d || d === 'always')) return { until: null };
+  let end;
+  if (d) {
+    const m = DURATION.exec(d);
+    if (!m || +m[1] < 1) return { error: `"${duration}" is not a duration like "4h", "1d", "2w", "1mo" or "always".` };
+    end = new Date(now);
+    const n = +m[1];
+    if (m[2] === 'mo') end.setUTCMonth(end.getUTCMonth() + n);
+    else end.setTime(now.getTime() + n * UNIT_MS[m[2]]);
+  } else {
+    const day = DAY.exec(u);
+    // A day alone runs to the start of the next one
+    const next = day && new Date(Date.UTC(+day[1], +day[2] - 1, +day[3] + 1)).toISOString().slice(0, 10);
+    const sec = parseLocalTime(next ? `${next} 00:00` : u);
+    if (sec === null) {
+      return {
+        error: `"${until}" is not a day like "2026-11-24" or a time like "2026-11-24 18:00" (${config.timeZone}).`,
+      };
+    }
+    end = new Date(sec * 1000);
+  }
+  if (end <= now) return { error: `${endLabel(end)} has already passed.` };
+  return { until: end };
+}
 
 /**
  * Tool to list, add or remove the server name parts excluded from Grafana analysis (alerts, host_health,
@@ -186,10 +251,14 @@ const matchSummary = (found) =>
 export function createIgnoreHostsTool(actor) {
   return tool(
     'grafana_ignore_hosts',
-    'List, add or remove the server name parts Fenix excludes from Grafana analysis (alert analyses, host_health, ' +
-      'host_logs), e.g. "test" excludes every server whose name contains "test". Matching is a case-insensitive ' +
-      'substring, so check the listed matches before adding. Use when the user asks to ignore, stop analysing, ' +
-      'mute or un-ignore a server or a group of servers.',
+    'List, add or remove the servers Fenix excludes from Grafana analysis (alert analyses, host_health, ' +
+      'host_logs). A name part such as "test" excludes every server whose name contains it (case-insensitive), ' +
+      'so check the listed matches; with `exact` only the server with exactly that name is excluded ("alpha" but ' +
+      'not "demo-alpha"). When the user names one server, use `exact`; for a group ("the staging servers"), a ' +
+      'part. An exclusion can end on its own: pass `duration` or ' +
+      '`until` ("today only" is `until` today\'s date); without either it lasts until removed. Adding a part again ' +
+      'changes when it ends and whether it is exact. Use when the user asks to ignore, stop analysing, mute or un-ignore a server or a ' +
+      'group of servers, for a while or for good.',
     {
       action: z.enum(['list', 'add', 'remove']).describe('list the excluded parts, add one, or remove one'),
       part: z
@@ -198,8 +267,23 @@ export function createIgnoreHostsTool(actor) {
         .describe(
           'The server name part to add or remove, e.g. "staging" or a full server name. Required for add and remove.',
         ),
+      exact: z
+        .boolean()
+        .optional()
+        .describe('add only: true to exclude only the server named exactly `part`; default false (name part)'),
+      duration: z
+        .string()
+        .optional()
+        .describe('add only: how long, "4h", "1d", "2w", "1mo", or "always" (the default)'),
+      until: z
+        .string()
+        .optional()
+        .describe(
+          `add only: when it ends, a day "YYYY-MM-DD" (through the end of that day) or "YYYY-MM-DD HH:MM", ` +
+            `in ${config.timeZone}`,
+        ),
     },
-    async ({ action, part }) => {
+    async ({ action, part, exact = false, duration, until }) => {
       try {
         if (action === 'list') {
           const fromConfig = config.grafana.ignoreHosts.map((p) => String(p).toLowerCase());
@@ -207,7 +291,11 @@ export function createIgnoreHostsTool(actor) {
           if (!fromConfig.length && !added.length) return textResult('No servers are excluded from Grafana analysis.');
           const lines = [];
           for (const p of fromConfig) lines.push(`• "${p}" (fenix.config.json; change it there and deploy)`);
-          for (const a of added) lines.push(`• "${a.part}" (added by ${a.addedBy}, ${a.addedAt.slice(0, 10)})`);
+          for (const a of added) {
+            const ends = a.until ? `until ${endLabel(new Date(a.until))}` : 'until removed';
+            const kind = a.exact ? 'exact name; ' : '';
+            lines.push(`• "${a.part}" (${kind}added by ${a.addedBy}, ${a.addedAt.slice(0, 10)}; ${ends})`);
+          }
           const known = await logHosts().catch(() => null);
           const excluded = known ? known.filter((h) => ignoredBy(h)).sort() : null;
           const now = excluded
@@ -233,25 +321,38 @@ export function createIgnoreHostsTool(actor) {
             );
           }
           return textResult(
-            `"${value}" is not excluded. Current parts: ${ignoreHostParts().join(', ') || 'none'}.`,
+            `"${value}" is not excluded. Current entries: ${[...ignoreHostNames(), ...ignoreHostParts()].join(', ') || 'none'}.`,
             true,
           );
         }
 
         // add
-        if (ignoreHostParts().includes(value)) return textResult(`"${value}" is already excluded.`);
-        const found = await serversMatching(value);
-        if (found && found.known > 1 && found.matches.length === found.known) {
+        if (config.grafana.ignoreHosts.some((p) => String(p).toLowerCase() === value)) {
+          return textResult(`"${value}" is already excluded in fenix.config.json, with no end.`);
+        }
+        const end = ignoreEnd({ duration, until });
+        if ('error' in end) return textResult(end.error, true);
+        const ends = end.until
+          ? `until ${endLabel(end.until)}, then they are analysed again on their own`
+          : 'until someone removes it';
+        const what = exact ? 'only this server' : 'every server whose name contains it';
+        if (addedIgnoreParts().some((a) => a.part === value)) {
+          addIgnorePart(value, actor(), { until: end.until, exact });
+          return textResult(`"${value}" stays excluded (${what}), now ${ends}.`);
+        }
+        const found = await serversMatching(value, exact);
+        if (!exact && found && found.known > 1 && found.matches.length === found.known) {
           return textResult(
             `Not added: "${value}" matches every server sending logs (${found.known}), so Fenix would analyse ` +
               'nothing. Use a more specific part or the full server name.',
             true,
           );
         }
-        addIgnorePart(value, actor());
+        addIgnorePart(value, actor(), { until: end.until, exact });
+        const servers = exact ? 'the server with exactly this name' : 'servers whose names contain it';
         return textResult(
           `Added "${value}": Fenix no longer analyses alerts for, or answers host_health / host_logs about, ` +
-            `servers whose names contain it. ${matchSummary(found)}`,
+            `${servers}, ${ends}. ${matchSummary(found, exact)}`,
         );
       } catch (e) {
         return textResult(`Could not update the excluded servers: ${e instanceof Error ? e.message : e}`, true);

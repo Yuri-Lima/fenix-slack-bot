@@ -236,7 +236,19 @@ Servers whose names contain a part in `grafana.ignoreHosts` (e.g. `"test"`) are 
 change the list by asking, in Slack or from Claude Code: *"stop analysing the staging servers"*, *"ignore
 billing-02"*, *"which servers are ignored?"*, *"analyse staging again"*. The `grafana_ignore_hosts` tool (list / add /
 remove) shows which servers sending logs a part matches, records who added it, and refuses a part that would match
-every server. Parts added this way live in `data/grafana-ignore-hosts.json`, so deploys keep them; parts in
+every server.
+
+When you name one server, Fenix excludes **that server only** (an exact name, case-insensitive): *"ignore alpha"*
+leaves `demo-alpha` analysed, and its reply names the similar servers that stay analysed. For a group, it uses a name
+part (*"stop analysing the staging servers"* excludes every server whose name contains `staging`). Asking again for the
+same name switches between the two.
+
+An exclusion can end on its own: *"ignore alpha for 4 hours"*, *"… for today only"*, *"… for a week"*, *"… until
+2026-11-30"*, *"… for a month"*, or *"… always"* (the default). The tool takes `duration` (`4h`, `1d`, `2w`, `1mo`,
+`always`) or `until` (a day, through its end, or `YYYY-MM-DD HH:MM`, both in `timeZone`). Once the end passes, the
+matching servers are analysed again with no restart, and the list shows when each part ends. Asking again for a part
+that is already excluded changes its end (*"keep alpha ignored until Friday"*). Parts added this way live in
+`data/grafana-ignore-hosts.json`, so deploys keep them; parts in
 `fenix.config.json` can only be removed there. It is offered to owners in Slack and to the owner's Claude Code
 connection (`FENIX_MCP_TOKEN`), not to clients that need Slack approval.
 
