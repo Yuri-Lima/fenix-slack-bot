@@ -5,6 +5,7 @@ import { baseUrl, config, resolvePath } from '../config.js';
 import { BLOCKED_PATHS_DESCRIPTION } from '../integrations/gitlab.js';
 import { clock, dayLabel } from '../integrations/host-health.js';
 import { BROKEN_MIN_RATE, FLAKY_MIN_RATE, MIN_RUNS } from '../integrations/test-history.js';
+import { attachSlackFiles } from '../integrations/youtrack.js';
 import { threadKey } from '../thread-context/index.js';
 import {
   addFeedback,
@@ -43,6 +44,8 @@ const threadLocks = new Set();
 /** @param {number} rate */
 const pct = (rate) => `${Math.round(rate * 100)}%`;
 const YT_PROJECT = config.youtrack.project;
+/** Most files youtrack_attach_files copies in one call. */
+const MAX_ATTACH_FILES = 10;
 const KEY_CONFIGS = config.teamcity.keyConfigs;
 
 const BASE_SYSTEM_PROMPT = `\
@@ -114,12 +117,16 @@ You have direct access to the team's YouTrack instance (project key: ${YT_PROJEC
 - \`youtrack_create_issue\` — create new tickets (defaults to project ${YT_PROJECT}, type Task)
 - \`youtrack_update_issue\` — change state, assignee, priority, or add comments
 - \`youtrack_my_issues\` — quick shortcut for someone's open issues
+- \`youtrack_attach_files\` — attach the files people shared in this Slack thread (screenshots, PDFs, logs) to an \
+issue; Slack copies them straight to YouTrack
 
 **When someone asks about tickets or tasks:**
 1. Search for the issue or list their open work
 2. Get full details when needed (description, comments, links)
 3. Update state or assignee when asked
 4. Create new tickets with proper type, priority, and assignee
+5. When the thread has files (screenshots, PDFs, logs) and you create a ticket about it, attach them with \
+\`youtrack_attach_files\` right after creating it, as part of the same approved action, and say which were attached
 
 **Common YouTrack query patterns:**
 - \`project: ${YT_PROJECT} for: jane.doe #Unresolved\` — someone's open tickets
@@ -172,15 +179,19 @@ with \`problems_only\`, \`service\`, or \`search\` instead of reading everything
 5. Logs can contain customer data: do not repeat e-mail addresses, personal names, or client IPs \
 unless the question needs them.
 
-## IMAGES
-Users can attach screenshots; you see them with their message. Read what is relevant (error text, times, \
-server names, values) and use it with the tools; do not describe the whole image back. If a message lists \
-attachments you could not read, say which and why in one line.
+## ATTACHED FILES
+Users can attach screenshots, PDFs and text files such as logs; you see them with their message (a long text \
+file only by its end, and secrets in it are already masked). Read what is relevant (error text, times, server \
+names, values) and use it with the tools; do not describe or summarise the whole file back unless asked. If a \
+message lists attachments you could not read, say which and why in one line.
 
 ## USER FEEDBACK
 When a user wants to give feedback about you (your responses, capabilities, or behavior):
 1. Listen to their feedback carefully
-2. Paraphrase what you understood back to them, including:
+2. If they explicitly ask you to save, record or add something as feedback (or as a reminder or improvement \
+for you), that request is the confirmation: call \`save_user_feedback\` right away, then show what you saved \
+(summary, category, actionable) and offer to correct it. Otherwise, paraphrase what you understood back to them, \
+including:
    - A one-line **summary** of what they said
    - The **category** you detected (${FEEDBACK_CATEGORIES.join(', ')})
    - The **sentiment** (${FEEDBACK_SENTIMENTS.join(', ')})
@@ -333,33 +344,49 @@ export function sinceLastReply(total, previous) {
 }
 
 /**
+ * The content block for one attached file.
+ * @param {import('../utils/slack.js').SlackAttachment} a
+ * @returns {import('@anthropic-ai/sdk/resources/messages').ContentBlockParam}
+ */
+function contentBlock(a) {
+  if (a.kind === 'image') {
+    return {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: /** @type {'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'} */ (a.mediaType),
+        data: a.data,
+      },
+    };
+  }
+  const source =
+    a.kind === 'pdf'
+      ? { type: /** @type {const} */ ('base64'), media_type: /** @type {const} */ ('application/pdf'), data: a.data }
+      : { type: /** @type {const} */ ('text'), media_type: /** @type {const} */ ('text/plain'), data: a.data };
+  return { type: 'document', source, title: a.name, ...(a.note && { context: `Fenix read ${a.note}.` }) };
+}
+
+/**
  * The prompt for one user message: stamped with the time it was sent (so "yesterday" and times in
- * screenshots can be resolved; kept out of the system prompt so that stays cacheable), plus any images.
+ * screenshots can be resolved) and, for an owner with `ownerTitle` set, how to address them; both kept out of
+ * the system prompt so that stays cacheable. Attached files go first: images as image blocks, PDFs and text files
+ * as document blocks titled with their file name.
  * @param {string} text
- * @param {import('../utils/slack.js').SlackImage[]} images
- * @param {number} [nowSec]
+ * @param {import('../utils/slack.js').SlackAttachment[]} attachments
+ * @param {{ nowSec?: number, addressAs?: string | null }} [options]
  * @returns {string | AsyncIterable<import('@anthropic-ai/claude-agent-sdk').SDKUserMessage>}
  */
-export function buildPrompt(text, images, nowSec = Date.now() / 1000) {
-  const stamped = `[Sent ${dayLabel(nowSec, { year: true })}, ${clock(nowSec)} ${config.timeZone}]\n${text}`;
-  if (images.length === 0) return stamped;
+export function buildPrompt(text, attachments, { nowSec = Date.now() / 1000, addressAs = null } = {}) {
+  const title = addressAs ? ` · address the sender as "${addressAs}"` : '';
+  const stamped = `[Sent ${dayLabel(nowSec, { year: true })}, ${clock(nowSec)} ${config.timeZone}${title}]\n${text}`;
+  if (attachments.length === 0) return stamped;
   /** @type {import('@anthropic-ai/claude-agent-sdk').SDKUserMessage} */
   const message = {
     type: 'user',
     parent_tool_use_id: null,
     message: {
       role: 'user',
-      content: [
-        ...images.map((i) => ({
-          type: /** @type {const} */ ('image'),
-          source: {
-            type: /** @type {const} */ ('base64'),
-            media_type: /** @type {'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'} */ (i.mediaType),
-            data: i.data,
-          },
-        })),
-        { type: 'text', text: stamped },
-      ],
+      content: [...attachments.map(contentBlock), { type: 'text', text: stamped }],
     },
   };
   return (async function* () {
@@ -373,13 +400,13 @@ export function buildPrompt(text, images, nowSec = Date.now() / 1000) {
  * @param {string} text - The user's message text.
  * @param {string | undefined} sessionId - An existing session ID to resume the thread's conversation.
  * @param {FenixDeps} deps - Slack context for the thread; Slack-bound tools close over it.
- * @param {{ images?: import('../utils/slack.js').SlackImage[], threadTotals?: import('../thread-context/store.js').ThreadTotals | null }} [input]
- *   images: attached to the message. threadTotals: the resumed session's running totals after its previous reply
+ * @param {{ attachments?: import('../utils/slack.js').SlackAttachment[], threadTotals?: import('../thread-context/store.js').ThreadTotals | null }} [input]
+ *   attachments: files attached to the message (images, PDFs, text). threadTotals: the resumed session's running totals after its previous reply
  *   (from the session store), so this reply is logged with its own cost and the thread limit can be checked.
  * @returns {Promise<{ responseText: string, sessionId: string | null, usage: import('../utils/usage-store.js').UsageRecord, threadTotals: import('../thread-context/store.js').ThreadTotals | null }>}
  *   threadTotals: the session's running totals after this reply, to store with the session (null when it did not run)
  */
-export async function runFenixAgent(text, sessionId, deps, { images = [], threadTotals = null } = {}) {
+export async function runFenixAgent(text, sessionId, deps, { attachments = [], threadTotals = null } = {}) {
   const startedAt = Date.now();
   /**
    * @param {import('../utils/usage-store.js').UsageRecord['outcome']} outcome
@@ -472,9 +499,70 @@ export async function runFenixAgent(text, sessionId, deps, { images = [], thread
     },
   );
 
+  const attachFilesTool = tool(
+    'youtrack_attach_files',
+    'Attach files that people shared in this Slack thread (screenshots, PDFs, logs, ...) to a YouTrack issue. ' +
+      'Slack copies them straight to YouTrack; you never handle the bytes. Use it right after youtrack_create_issue ' +
+      'when the thread has files, or when the user asks to attach them. Leave out `files` to attach all of them.',
+    {
+      issue_id: z.string().describe('The issue, e.g. "DEV-1234".'),
+      files: z
+        .array(z.string())
+        .optional()
+        .describe('Names of the files to attach, as shown in Slack (default: every file people shared in the thread).'),
+    },
+    async ({ issue_id, files }) => {
+      try {
+        const replies = await deps.client.conversations.replies({
+          channel: deps.channelId,
+          ts: deps.threadTs,
+          limit: 200,
+        });
+        // Files people shared (not Fenix's or other bots' posts), oldest first, each once
+        const shared = new Map();
+        for (const m of replies.messages || []) {
+          if (m.bot_id) continue;
+          for (const f of /** @type {any[]} */ (m.files || [])) {
+            const url = f.url_private_download || f.url_private;
+            if (url && !shared.has(f.id))
+              shared.set(f.id, { name: f.name || f.title || f.id, mimetype: f.mimetype, url, size: f.size });
+          }
+        }
+        if (!shared.size)
+          return textResult('Nobody shared a file in this thread, so there is nothing to attach.', true);
+        const all = [...shared.values()];
+        const wanted = files?.length ? all.filter((f) => files.includes(f.name)) : all;
+        const missing = (files || []).filter((n) => !all.some((f) => f.name === n));
+        if (!wanted.length) {
+          return textResult(
+            `None of those files is in this thread. Files here: ${all.map((f) => f.name).join(', ')}.`,
+            true,
+          );
+        }
+        const chosen = wanted.slice(0, MAX_ATTACH_FILES);
+        const { attached, skipped } = await attachSlackFiles(
+          /** @type {string} */ (deps.client.token),
+          issue_id.trim().toUpperCase(),
+          chosen,
+        );
+        const notes = [
+          attached.length ? `Attached to ${issue_id}: ${attached.join(', ')}.` : `Nothing was attached to ${issue_id}.`,
+          skipped.length ? `Not attached: ${skipped.join('; ')}.` : '',
+          wanted.length > chosen.length ? `Only the first ${MAX_ATTACH_FILES} files were attached.` : '',
+          missing.length ? `Not in this thread: ${missing.join(', ')}.` : '',
+        ];
+        return textResult(notes.filter(Boolean).join(' '), !attached.length);
+      } catch (e) {
+        const err = /** @type {any} */ (e);
+        return textResult(`Could not attach the files: ${err.data?.error || err.message}`, true);
+      }
+    },
+  );
+
   const saveFeedbackTool = tool(
     'save_user_feedback',
-    'Save confirmed user feedback to the persistent store. Only call after the user explicitly confirms your paraphrase.',
+    'Save user feedback to the persistent store. Call it right away when the user explicitly asks you to save or ' +
+      'record something as feedback or a reminder for improvement; otherwise only after they confirm your paraphrase.',
     {
       original_text: z.string().describe("The user's original feedback message verbatim"),
       summary: z.string().describe('Your one-line paraphrase of the feedback'),
@@ -502,7 +590,7 @@ export async function runFenixAgent(text, sessionId, deps, { images = [], thread
   );
 
   /** @type {Array<import('@anthropic-ai/claude-agent-sdk').SdkMcpToolDefinition<any>>} */
-  const closureTools = [addEmojiReactionTool, markResolvedTool, saveFeedbackTool];
+  const closureTools = [addEmojiReactionTool, markResolvedTool, saveFeedbackTool, attachFilesTool];
 
   // Admin-only tools: only injected when the caller is an owner
   if (isOwner(deps.userId)) {
@@ -629,7 +717,7 @@ export async function runFenixAgent(text, sessionId, deps, { images = [], thread
     /** @type {any} */
     let result = null;
 
-    const prompt = buildPrompt(text, images);
+    const prompt = buildPrompt(text, attachments, { addressAs: isOwner(deps.userId) ? config.ownerTitle : null });
     for await (const message of query({ prompt, options: { ...options, abortController: ac } })) {
       if (message.type === 'assistant') {
         for (const block of message.message.content) {

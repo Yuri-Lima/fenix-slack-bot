@@ -117,11 +117,23 @@ describe('buildPrompt', () => {
   const now = Date.parse('2026-11-17T17:05:00Z') / 1000;
 
   it('stamps the send time (test zone UTC) on a plain-text prompt', () => {
-    assert.strictEqual(buildPrompt('what happened?', [], now), '[Sent Tue, 17 Nov 2026, 17:05 UTC]\nwhat happened?');
+    assert.strictEqual(
+      buildPrompt('what happened?', [], { nowSec: now }),
+      '[Sent Tue, 17 Nov 2026, 17:05 UTC]\nwhat happened?',
+    );
+  });
+
+  it('asks the model to address an owner by their title, when one is given', () => {
+    assert.strictEqual(
+      buildPrompt('status?', [], { nowSec: now, addressAs: 'my lord' }),
+      '[Sent Tue, 17 Nov 2026, 17:05 UTC · address the sender as "my lord"]\nstatus?',
+    );
   });
 
   it('sends images first, then the stamped text, as one user message', async () => {
-    const prompt = buildPrompt('see this', [{ name: 'a.png', mediaType: 'image/png', data: 'AAAA' }], now);
+    const prompt = buildPrompt('see this', [{ name: 'a.png', kind: 'image', mediaType: 'image/png', data: 'AAAA' }], {
+      nowSec: now,
+    });
     assert.notStrictEqual(typeof prompt, 'string');
     const messages = [];
     for await (const m of /** @type {AsyncIterable<any>} */ (prompt)) messages.push(m);
@@ -129,6 +141,40 @@ describe('buildPrompt', () => {
     const [image, text] = messages[0].message.content;
     assert.deepStrictEqual(image, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } });
     assert.deepStrictEqual(text, { type: 'text', text: '[Sent Tue, 17 Nov 2026, 17:05 UTC]\nsee this' });
+  });
+});
+
+describe('buildPrompt with PDFs and text files', () => {
+  it('sends them as titled document blocks, saying when a text file was cut', async () => {
+    const prompt = buildPrompt(
+      'why did it fail?',
+      [
+        { name: 'r.pdf', kind: 'pdf', mediaType: 'application/pdf', data: 'JVBERi0=' },
+        {
+          name: 'app.log',
+          kind: 'text',
+          mediaType: 'text/plain',
+          data: 'ERROR x',
+          note: 'only the last 5 of 9 characters',
+        },
+      ],
+      { nowSec: Date.parse('2026-11-17T17:05:00Z') / 1000 },
+    );
+    const messages = [];
+    for await (const m of /** @type {AsyncIterable<any>} */ (prompt)) messages.push(m);
+    const [pdf, log, text] = messages[0].message.content;
+    assert.deepStrictEqual(pdf, {
+      type: 'document',
+      source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' },
+      title: 'r.pdf',
+    });
+    assert.deepStrictEqual(log, {
+      type: 'document',
+      source: { type: 'text', media_type: 'text/plain', data: 'ERROR x' },
+      title: 'app.log',
+      context: 'Fenix read only the last 5 of 9 characters.',
+    });
+    assert.strictEqual(text.type, 'text');
   });
 });
 

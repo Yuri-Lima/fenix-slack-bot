@@ -359,8 +359,8 @@ export function describeStatus(member) {
  */
 
 /**
- * An image or video to post with the message: a file on disk (an upload), plus how to let it go.
- * @typedef {import('../../utils/slack.js').SlackFile & { kind: 'image' | 'video', release: () => void }} SendAttachment
+ * A file to post with the message (image, video, PDF or text): a file on disk (an upload), plus how to let it go.
+ * @typedef {import('../../utils/slack.js').SlackFile & { kind: import('../../mcp/uploads.js').FileKind, release: () => void }} SendAttachment
  */
 
 /**
@@ -442,7 +442,7 @@ async function postText(client, target, text) {
 }
 
 /**
- * Post an image or video with `text` as its caption, in one message; returns the file's link.
+ * Post a file (image, video, PDF or text) with `text` as its caption, in one message; returns the file's link.
  * File uploads need a conversation ID, so a user ID is first turned into Fenix's DM with them.
  * @param {import('@slack/web-api').WebClient} client
  * @param {SendTarget} target
@@ -507,12 +507,12 @@ export async function deliverMessage(client, directory, target, text, attachment
  * @property {(target: SendTarget, text: string, attachment?: SendAttachment) => Promise<ReturnType<typeof textResult>>} [approve]
  *   instead of posting, hand the resolved draft to the owner for approval (it then owns the attachment)
  * @property {(id: string) => Omit<SendAttachment, 'alt'> | null} [takeAttachment]
- *   turn an upload_id into its image or video (once); without it the tool takes no attachments
+ *   turn an upload_id into its file (once); without it the tool takes no attachments
  * @property {string} [uploadHint] - how this connection uploads a file, shown in the tool description
  */
 
 /**
- * Tool that posts a message as Fenix to a channel, a DM or a thread, optionally with an image or video.
+ * Tool that posts a message as Fenix to a channel, a DM or a thread, optionally with an uploaded file.
  * It changes something, so it is never in READ_ONLY_TOOLS: the MCP server offers it only to
  * connections allowed to send.
  * @param {import('@slack/web-api').WebClient} client
@@ -531,7 +531,7 @@ export function createSlackSendMessageTool(
       'Before DMing someone, check slack_users for the right person and tell the user if they are away or on ' +
       'vacation. If a channel is not found, check slack_channels for the exact name before suggesting an invite.' +
       (takeAttachment
-        ? ' To attach an image or video, upload the file first and pass the returned upload_id as `attachment`' +
+        ? ' To attach an image, video, PDF or text/log file, upload the file first and pass the returned upload_id as `attachment`' +
           (uploadHint ? `: ${uploadHint}` : '.') +
           ' The text becomes its caption in the same message.'
         : '') +
@@ -562,15 +562,12 @@ export function createSlackSendMessageTool(
         ),
       ...(takeAttachment
         ? {
-            attachment: z
-              .string()
-              .optional()
-              .describe('upload_id of an image or video uploaded to Fenix (see the description).'),
+            attachment: z.string().optional().describe('upload_id of a file uploaded to Fenix (see the description).'),
             attachment_alt: z
               .string()
               .max(1000)
               .optional()
-              .describe('Short description of the image or video for screen readers.'),
+              .describe('Short description of an image or video for screen readers.'),
             image: z.string().optional().describe('Same as `attachment` (older name).'),
             image_alt: z.string().max(1000).optional().describe('Same as `attachment_alt` (older name).'),
           }

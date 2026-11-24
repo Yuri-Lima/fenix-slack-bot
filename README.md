@@ -39,7 +39,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | 🔴 | **Automatic build-failure analysis** | Watches TeamCity notifications in Slack and replies in-thread with new vs. pre-existing failures, flaky tests, the real error behind Cypress/Docker boilerplate, and a ranked list of likely-culprit commits. Workers SIGKILLed by the host (OOM) are reported as infrastructure, not blamed on commits. |
 | 📈 | **Grafana alert analysis** | Explains each Grafana alert from real metrics and logs: whether load was real CPU pressure or waiting tasks, which Phoenix checks failed, whether the machine is unreachable, which errors coincided, how often it repeats, and what to do next. Fleet-wide alerts are reported as one central cause. |
 | 🪵 | **Server logs on request** | Ask "what happened on web-01 in the last 5 minutes?" (or yesterday at 11:10) and Fenix reads that server's logs from Grafana Loki (read-only), resolves the name you typed, groups repeated lines into a timeline with secrets masked, and answers your question instead of pasting logs. |
-| 🖼️ | **Reads screenshots** | Attach a screenshot to a DM or mention (an error dialog, a Grafana panel, a table of timestamps) and Fenix reads it with your question, then checks the servers or code it points to. |
+| 🖼️ | **Reads screenshots, PDFs and logs** | Attach a screenshot, a PDF or a log file to a DM or mention (an error dialog, a Grafana panel, a report, an exported log) and Fenix reads it with your question, then checks the servers or code it points to. |
 | ♻️ | **Flaky-test tracker** | Answers "what's flaky?", "what got worse this week?", and "when did this test start failing?" from TeamCity's test history. |
 | 🎫 | **YouTrack assistant** | Search, read, create, and update issues in natural language, with explicit confirmation before any write. |
 | 🧭 | **Codebase navigator** | Read-only GitLab access to search code, read files, browse directories, and inspect recent commits. |
@@ -110,6 +110,7 @@ Fenix's agent can only call the tools below. It runs with Claude Code's built-in
 | `youtrack_my_issues` | Shortcut for someone's open issues. |
 | `youtrack_create_issue` | Create an issue with type, priority, and assignee. **Requires confirmation.** |
 | `youtrack_update_issue` | Change state, assignee, or priority, or add a comment. **Requires confirmation.** |
+| `youtrack_attach_files` | Attach the files people shared in the Slack thread (screenshots, PDFs, logs; up to 10, 10 MB each) to an issue, copied from Slack straight to YouTrack. Used right after creating a ticket from a thread with files. Slack only. |
 
 ### Codebase (GitLab, read-only)
 
@@ -131,7 +132,7 @@ Fenix's agent can only call the tools below. It runs with Claude Code's built-in
 |---|---|
 | `add_emoji_reaction` | Acknowledge a message with a topic-appropriate reaction. |
 | `mark_resolved` | Add ✅ to the thread's parent once an issue is resolved. |
-| `save_user_feedback` | Store structured feedback (summary, category, sentiment, actionable) after the user confirms it. |
+| `save_user_feedback` | Store structured feedback (summary, category, sentiment, actionable): at once when the user asks to record something as feedback or a reminder, otherwise after they confirm Fenix's paraphrase. |
 | `list_user_feedback` | *Owner only.* Review stored feedback with filters. |
 | `feedback_stats` | *Owner only.* Aggregate feedback by category and sentiment. |
 
@@ -224,9 +225,12 @@ stamped with its send time so "yesterday" resolves):
   tokens and credentials in URLs are masked. Filters: `service`, `search` text, `problems_only`.
 - **`host_health`** adds the metrics and a verdict when the question is about the server being down or slow.
 
-Screenshots attached to a DM or a mention are read as images (PNG, JPEG, GIF, WebP; up to 4 per message, 5 MB
-each, type checked from the bytes; downloaded with the `files:read` scope), so *"what happened here?"* with a
-screenshot of an error works. Other attachments are named back as not readable.
+Files attached to a DM or a mention are read with the question, up to 4 per message, downloaded with the
+`files:read` scope and type checked from their bytes: screenshots (PNG, JPEG, GIF, WebP, up to 5 MB), PDFs (up to
+5 MB, since each page costs tokens) and text files such as logs, snippets, CSV or JSON (valid UTF-8, up to 10 MB). A
+text file has its secrets masked (the same rules as `host_logs`) and only its last 200,000 characters (about 50k
+tokens) are read, with Fenix told so. *"What happened here?"* with a screenshot or an exported log works. Videos,
+archives and other files are named back as not readable.
 
 A typical answer costs a few thousand tokens, since the model reads the grouped timeline, not raw logs.
 
@@ -300,8 +304,27 @@ the owners get when someone reaches a limit includes the command to raise it.
 
 From `warnAt` (80%)
 of a limit, the reply footer shows what is left, e.g. `⏳ budget today: $2.50 of $3.00`. A refused request is
-logged with the outcome `budget`. The costs are the SDK's estimates; the Claude Console's spend limit for the API
-key's workspace is the hard stop if Fenix ever gets it wrong.
+logged with the outcome `budget`. The Claude Console's spend limit for the API key's workspace stays the hard stop
+if Fenix ever gets it wrong.
+
+#### Billed costs
+
+Each reply's cost is the Agent SDK's estimate. To make the budgets follow what Anthropic actually bills, give Fenix
+read access to the bill:
+
+1. In the Claude Console, an organization admin creates an **Admin API key** (Settings → Admin keys) and puts it on
+   the server as `ANTHROPIC_ADMIN_KEY` in `.env` or in `~/.anthropic_admin_key`. It is only used to list costs, but an
+   admin key can manage the whole organization, so keep it to that server.
+2. Set `usage.billing.apiKeyIds` to the ID (`apikey_…`, under Settings → API keys) of the key in
+   `ANTHROPIC_API_KEY`. Use a key only Fenix uses, or the bill includes other work.
+
+Fenix then fetches the bill for its key from the Usage and Cost API every `usage.billing.refreshHours` (default 6)
+into `data/usage/billed.json`, and compares it with its own estimates over the last 7 complete billed days. Every
+budget check multiplies the estimates by that ratio (kept between 0.25 and 4, and 1 until there is at least $1 of
+estimates to compare), so limits are in billed dollars. The bill cannot do this alone: it arrives 4 to 24 hours late
+and does not know which Slack user asked. The usage report and `usage_report` show the bill next to the estimate,
+e.g. `Billed by Anthropic $12.40 for full days through 2026-11-22 (UTC), where Fenix estimated $10.10; budgets count
+estimates ×1.23.` Without the admin key or `apiKeyIds`, everything works on estimates as before.
 
 When that Console limit is reached, the API refuses every call. Fenix then replies that its API credits are used up
 until the date the API names (instead of a generic error), logs the run with the error `api_usage_limit`, and DMs
@@ -326,7 +349,7 @@ the Fenix server.
   - `slack_users` (read-only, every connection): the people Fenix can message, with handle, user ID, title,
     active/away, custom status (vacation, sick, focus...) and when it clears, huddles, and local time.
   - `slack_send_message` (connections with the `send` scope; see *Other MCP clients*): posts as Fenix to `me` (a DM to the owner),
-    `#channel`, `@person`, a Slack ID, or a thread given by its message link, optionally with an uploaded image or video,
+    `#channel`, `@person`, a Slack ID, or a thread given by its message link, optionally with an uploaded image, video, PDF or text/log file,
     and returns the message link. For a DM
     it also notes the recipient's status. It is not marked read-only, so Claude Code asks before each send; clients
     registered with Slack approval only draft, and OAuth sign-ins from Claude app connectors never get it.
@@ -395,9 +418,12 @@ curl -sS -T demo.mp4 "https://<your-fenix-domain>/uploads?filename=demo.mp4" \
 # {"upload_id":"up_...","filename":"demo.mp4","kind":"video","bytes":24117248,"expires_in":3600}
 ```
 
-Uploads stream to disk (`data/uploads/`, private files, cleared on start) and on to Slack, never into memory. Only
-connections with the `send` scope can upload. An upload belongs to the client that made it, works once, is checked
-to be a real image or video by its first bytes, and expires after an hour. Limits: `mcp.maxUploadMb` per file (default
+Uploads stream to disk (`data/uploads/`, private files) and on to Slack, never into memory. Images (PNG, JPEG, GIF,
+WebP), videos (MP4, MOV, WebM) and PDFs are recognised by their first bytes; anything else must be UTF-8 text with no
+NUL bytes (logs, `.txt`, `.csv`, `.json`, `.md`, `.yaml`), checked as it streams, and keeps its extension only if it is
+one of those (otherwise `.txt`). Only connections with the `send` scope can upload. An upload belongs to the client that
+made it, works once, and expires after an hour. Waiting uploads and drafts are saved in `data/` (`mcp-uploads.json`,
+`mcp-send-drafts.json`), so a restart or deploy keeps them and approval buttons still work. Limits: `mcp.maxUploadMb` per file (default
 200) and `mcp.maxUploadTotalMb` held at once (default 1024). With Slack approval, the file is first uploaded into the
 owner's DM as a preview, so they can look at or play it before clicking **Send**; it is deleted once decided.
 
@@ -466,6 +492,7 @@ so the source stays generic.
 | Variable | Required | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | ✅ | Anthropic API key. |
+| `ANTHROPIC_ADMIN_KEY` | Optional | Admin API key (or `~/.anthropic_admin_key`) to read what Anthropic billed for Fenix's key; see *Billed costs*. |
 | `SLACK_BOT_TOKEN` | ✅ | Bot token (`xoxb-…`). |
 | `SLACK_APP_TOKEN` | ✅ | App-level token (`xapp-…`) with `connections:write`, for Socket Mode. |
 | `TEAMCITY_TOKEN` | For CI features | TeamCity access token. |
@@ -491,6 +518,7 @@ cp fenix.config.example.json fenix.config.json
 | `ownerIds` | Slack user IDs of the owners: full access, admin tools (feedback, usage, excluded servers), `report`, `delete`, and MCP approvals. |
 | `allowedUserIds` | Other Slack user IDs that may ask Fenix anything its tools cover; their requests still pass the input guard. Everyone else gets a friendly "not ready yet" reply. |
 | `ownerName` | Name shown in access and error messages. |
+| `ownerTitle` | How Fenix addresses an owner when replying to them, e.g. `"my lord"` (optional; default none). |
 | `adminDmChannel` | DM channel where messages from non-owners are forwarded (optional). |
 | `teamcity.url` / `teamcity.botId` | TeamCity base URL and the Slack bot ID of the TeamCity app, whose failure posts trigger the analysis. |
 | `teamcity.keyConfigs` | Build configurations the agent should know by name: `[{ "id", "description" }]`. |
@@ -503,9 +531,10 @@ cp fenix.config.example.json fenix.config.json
 | `grafana.ignoreHosts` | Parts of server names Fenix never analyses, case-insensitive (e.g. `["test"]`): their alerts get no reply and `host_logs` / `host_health` decline them. Default none. Owners can add more by asking (see *Excluding servers*). |
 | `mcp.enabled` / `mcp.host` / `mcp.port` / `mcp.path` | MCP endpoint for Claude Code (default off, `127.0.0.1:8787/mcp`). |
 | `mcp.publicUrl` / `mcp.oauthRedirectUris` / `mcp.cimdOrigins` | Public HTTPS origin of the endpoint, which turns on OAuth sign-in for Claude app connectors; the callback URLs clients may register; and the origins whose client metadata documents may be fetched (defaults: Claude's). |
-| `mcp.maxUploadMb` / `mcp.maxUploadTotalMb` | Largest image or video an MCP client may upload for `slack_send_message` (default 200 MB), and the total held on disk at once (default 1024 MB). |
+| `mcp.maxUploadMb` / `mcp.maxUploadTotalMb` | Largest file an MCP client may upload for `slack_send_message` (default 200 MB), and the total held on disk at once (default 1024 MB). |
 | `usage.retentionMonths` | Months of usage logs to keep (default 12). |
 | `usage.budgets` | Spending limits for people other than owners, and per reply: `userDailyUsd`, `userMonthlyUsd`, `teamMonthlyUsd`, `threadMaxUsd`, `replyMaxUsd`, `warnAt`, and `perUser` (Slack ID → own `dailyUsd` / `monthlyUsd`, optionally `until` a day). See *Budgets*. |
+| `usage.billing` | `apiKeyIds`: the Anthropic API key IDs only Fenix uses, and `refreshHours` (default 6). With `ANTHROPIC_ADMIN_KEY` set, budgets follow the bill. See *Billed costs*. |
 | `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |
 | `dataDir` | Directory for persisted state: feedback and the failure log (default `data`). |

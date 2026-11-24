@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { config, resolvePath } from '../config.js';
+import { readJsonFile, writeJsonFile } from './json-file.js';
 
 // Server name parts excluded from Grafana analysis that owners added by asking
 // Fenix (the grafana_ignore_hosts tool). They live in data/, which deploys never
@@ -32,21 +32,13 @@ const active = (a, now) => !a.until || Date.parse(a.until) > now.getTime();
  * @returns {AddedIgnorePart[]}
  */
 export function addedIgnoreParts(now = new Date()) {
-  if (!cache) {
-    try {
-      cache = JSON.parse(readFileSync(STORE_FILE, 'utf-8')).added || [];
-    } catch {
-      cache = []; // nothing added yet
-    }
-  }
+  cache ??= readJsonFile(STORE_FILE, { added: [] }).added || []; // nothing added yet: []
   return /** @type {AddedIgnorePart[]} */ (cache).filter((a) => active(a, now));
 }
 
 /** @param {AddedIgnorePart[]} added */
 function save(added) {
-  mkdirSync(dirname(STORE_FILE), { recursive: true });
-  writeFileSync(`${STORE_FILE}.tmp`, JSON.stringify({ added }, null, 2), 'utf-8');
-  renameSync(`${STORE_FILE}.tmp`, STORE_FILE);
+  writeJsonFile(STORE_FILE, { added });
   cache = added;
 }
 

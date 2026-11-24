@@ -103,7 +103,7 @@ export const getIssueTool = tool(
 
 export const createIssueTool = tool(
   'youtrack_create_issue',
-  `Create a new YouTrack issue. Default project is ${YT_PROJECT}.`,
+  `Create a new YouTrack issue. Default project is ${YT_PROJECT}. To add screenshots or other files shared in the Slack thread, call youtrack_attach_files afterwards (in Slack).`,
   {
     summary: z.string().describe('Issue title/summary.'),
     description: z.string().describe('Issue description (Markdown supported).').optional(),

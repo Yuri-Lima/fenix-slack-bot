@@ -108,6 +108,22 @@ export function ignoredBy(host) {
 }
 
 /**
+ * Text with its secrets replaced by "[redacted]": key=value and "key":"value" pairs (passwords, tokens, API keys,
+ * authorization), bearer tokens, and passwords in URLs. Used for log lines and for text files read from Slack.
+ * @param {string} text
+ * @returns {string}
+ */
+export function maskSecrets(text) {
+  return text
+    .replace(
+      /\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)(["']?\s*[:=]\s*["']?)(?:Bearer\s+)?[^\s"',;&]+/gi,
+      '$1$2[redacted]',
+    )
+    .replace(/\bBearer\s+[\w.~+/-]+=*/g, 'Bearer [redacted]')
+    .replace(/(\b[a-z][\w+.-]*:\/\/[^:/\s@]+:)[^@/\s]+@/gi, '$1[redacted]@');
+}
+
+/**
  * Tool answer for an excluded host: short, so the model spends no tokens on it.
  * @param {string} host
  * @returns {string}
@@ -199,7 +215,7 @@ const MAX_SAMPLE_CHARS = 1000;
  */
 export function readableLogLine(line) {
   return (
-    line
+    maskSecrets(line)
       // biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI color codes, which start with ESC (\x1b)
       .replace(/\x1b\[[0-9;]*m/g, '')
       // Leading timestamps: ISO, nginx (2026/11/13 17:38:24), Phoenix (11/13/26, 3:47 P11 -)
@@ -209,13 +225,6 @@ export function readableLogLine(line) {
       // nginx "37#37: *954 " worker/connection ids and the client address
       .replace(/\b\d+#\d+: (\*\d+ )?/, '')
       .replace(/,? client: [^,]+,/, ',')
-      // Secrets: key=value / "key":"value" pairs, bearer tokens, passwords in URLs
-      .replace(
-        /\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)(["']?\s*[:=]\s*["']?)(?:Bearer\s+)?[^\s"',;&]+/gi,
-        '$1$2[redacted]',
-      )
-      .replace(/\bBearer\s+[\w.~+/-]+=*/g, 'Bearer [redacted]')
-      .replace(/(\b[a-z][\w+.-]*:\/\/[^:/\s@]+:)[^@/\s]+@/gi, '$1[redacted]@')
       // Health-check JSON: drop the components that are fine
       .replace(/"[\w-]+":\{"status":"up"\},?/g, '')
       .replace(/,\}/g, '}')

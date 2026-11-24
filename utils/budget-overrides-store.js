@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { config, resolvePath } from '../config.js';
+import { readJsonFile, writeJsonFile } from './json-file.js';
 
 // Spending limits that owners set for a person by asking Fenix (the budget_limits tool or the `limit`
 // command). They live in data/, which deploys never overwrite, and take precedence over the person's
@@ -22,21 +22,13 @@ let cache = null;
 
 /** @returns {Record<string, BudgetOverride>} Slack user ID -> override */
 export function budgetOverrides() {
-  if (!cache) {
-    try {
-      cache = JSON.parse(readFileSync(STORE_FILE, 'utf-8')).overrides || {};
-    } catch {
-      cache = {}; // nothing set yet
-    }
-  }
+  cache ??= readJsonFile(STORE_FILE, { overrides: {} }).overrides || {}; // nothing set yet: {}
   return /** @type {Record<string, BudgetOverride>} */ (cache);
 }
 
 /** @param {Record<string, BudgetOverride>} overrides */
 function save(overrides) {
-  mkdirSync(dirname(STORE_FILE), { recursive: true });
-  writeFileSync(`${STORE_FILE}.tmp`, JSON.stringify({ overrides }, null, 2), 'utf-8');
-  renameSync(`${STORE_FILE}.tmp`, STORE_FILE);
+  writeJsonFile(STORE_FILE, { overrides });
   cache = overrides;
 }
 

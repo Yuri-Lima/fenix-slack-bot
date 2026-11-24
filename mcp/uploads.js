@@ -1,18 +1,23 @@
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { createWriteStream, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { config, resolvePath } from '../config.js';
+import { readJsonFile, writeJsonFile } from '../utils/json-file.js';
 
-// Images and videos MCP clients upload (POST or PUT /uploads) to attach to
-// slack_send_message. The bytes stream from the client's shell to disk, never
-// through the model: the client gets an upload_id and passes that to the tool.
-// An upload belongs to the client that made it, can be attached once, and
-// expires; only real images and videos (checked by their first bytes) are kept.
+// Files MCP clients upload (POST or PUT /uploads) to attach to slack_send_message:
+// images, videos, PDFs and plain-text files such as logs. The bytes stream from the
+// client's shell to disk, never through the model: the client gets an upload_id and
+// passes that to the tool. An upload belongs to the client that made it, can be
+// attached once, and expires; only real images, videos and PDFs (checked by their
+// first bytes) and valid UTF-8 text (checked as it streams) are kept.
 // Whoever takes an upload owns its file and must delete it (deleteUploadFile)
 // once it is posted or dropped; a sweep removes anything left behind.
+// The list of waiting uploads is saved next to them, so a restart or deploy keeps them.
 
 const UPLOAD_DIR = join(resolvePath(config.dataDir), 'uploads');
+/** Waiting uploads, outside UPLOAD_DIR so the sweep never counts or removes it. */
+const INDEX_FILE = join(resolvePath(config.dataDir), 'mcp-uploads.json');
 /** How long an upload waits to be attached. */
 export const UPLOAD_TTL_SEC = 60 * 60;
 /** Files older than this are removed whatever holds them (upload TTL + the 30-minute approval window, with margin). */
@@ -32,28 +37,40 @@ const maxTotalBytes = () => config.mcp.maxUploadTotalMb * 1024 * 1024;
  * @property {number} size - bytes
  * @property {string} filename
  * @property {string} mimeType
- * @property {'image' | 'video'} kind
+ * @property {FileKind} kind
  * @property {number} expiresAt - epoch seconds
  */
 
-/** @type {Map<string, Upload>} */
-const uploads = new Map();
+/** @typedef {'image' | 'video' | 'pdf' | 'text'} FileKind */
+/** @typedef {{ mimeType: string, ext: string, kind: FileKind }} FileType */
+
 const nowSec = () => Math.floor(Date.now() / 1000);
 
-// Uploads live in memory, so files from before a restart can never be attached: start clean
-rmSync(UPLOAD_DIR, { recursive: true, force: true });
 mkdirSync(UPLOAD_DIR, { recursive: true, mode: 0o700 });
+/** @type {Map<string, Upload>} waiting uploads from before a restart, if their files are still there */
+const uploads = new Map(
+  /** @type {Upload[]} */ (readJsonFile(INDEX_FILE, { uploads: [] }).uploads || [])
+    .filter((u) => u.expiresAt > nowSec() && existsSync(u.path))
+    .map((u) => [u.id, u]),
+);
+
+function saveIndex() {
+  writeJsonFile(INDEX_FILE, { uploads: [...uploads.values()] }, { mode: 0o600 });
+}
 
 /** Brands of ISO media files that are still images (AVIF, HEIC), not video. */
 const IMAGE_BRANDS = new Set(['avif', 'avis', 'heic', 'heix', 'mif1', 'msf1']);
 
 /**
- * The media type from a file's first bytes, or null if it is not a supported image or video.
+ * The type of a binary file from its first bytes: a supported image, video or PDF, else null. Text files have
+ * no signature; check them with textChecker().
  * @param {Buffer} data - at least the first SNIFF_BYTES bytes when available
- * @returns {{ mimeType: string, ext: string, kind: 'image' | 'video' } | null}
+ * @returns {FileType | null}
  */
-export function sniffMedia(data) {
+export function sniffFile(data) {
   const hex = data.subarray(0, 12).toString('hex');
+  if (data.subarray(0, 5).toString('latin1') === '%PDF-')
+    return { mimeType: 'application/pdf', ext: 'pdf', kind: 'pdf' };
   if (hex.startsWith('89504e470d0a1a0a')) return { mimeType: 'image/png', ext: 'png', kind: 'image' };
   if (hex.startsWith('ffd8ff')) return { mimeType: 'image/jpeg', ext: 'jpg', kind: 'image' };
   if (hex.startsWith('474946383761') || hex.startsWith('474946383961')) {
@@ -77,15 +94,59 @@ export function sniffMedia(data) {
   return null;
 }
 
+/** Extensions a text file keeps; any other becomes .txt (so nothing arrives as .html or .svg). */
+const TEXT_EXTS = new Set(['txt', 'log', 'csv', 'json', 'ndjson', 'md', 'yaml', 'yml']);
+
+/**
+ * The type for a text file named `filename`.
+ * @param {string | null} filename
+ * @returns {FileType}
+ */
+export function textType(filename) {
+  const ext = /\.([A-Za-z0-9]+)$/.exec(filename || '')?.[1]?.toLowerCase() ?? '';
+  return { mimeType: 'text/plain', ext: TEXT_EXTS.has(ext) ? ext : 'txt', kind: 'text' };
+}
+
+/**
+ * Checks, chunk by chunk, that a file is plain text: valid UTF-8 (split characters across chunks are fine)
+ * and no NUL bytes, which binary files have and text never does.
+ * @returns {{ feed: (chunk: Buffer) => boolean, end: () => boolean }} each returns false once it is not text
+ */
+export function textChecker() {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let ok = true;
+  /** @param {() => void} check */
+  const run = (check) => {
+    if (!ok) return false;
+    try {
+      check();
+    } catch {
+      ok = false;
+    }
+    return ok;
+  };
+  return {
+    feed: (chunk) =>
+      run(() => {
+        if (chunk.includes(0)) throw new Error('NUL byte');
+        decoder.decode(chunk, { stream: true });
+      }),
+    end: () => run(() => decoder.decode()),
+  };
+}
+
 /** Remove expired uploads and their files, and any file older than ORPHAN_AGE_MS. */
 function sweep() {
   const now = nowSec();
+  let changed = false;
   for (const [id, u] of uploads) {
     if (u.expiresAt <= now) {
       uploads.delete(id);
       deleteUploadFile(u.path);
+      changed = true;
     }
   }
+  if (changed) saveIndex();
   for (const name of readdirSync(UPLOAD_DIR)) {
     const path = join(UPLOAD_DIR, name);
     try {
@@ -131,8 +192,8 @@ function safeFilename(name, ext) {
 }
 
 /**
- * Stream an uploaded image or video to disk for its owner, enforcing the size limits and checking
- * its type from the first bytes. Anything rejected is deleted.
+ * Stream an uploaded file to disk for its owner, enforcing the size limits and checking its type: images,
+ * videos and PDFs from the first bytes, text as it streams. Anything rejected is deleted.
  * @param {string} owner - MCP client name
  * @param {AsyncIterable<Buffer>} body - the request
  * @param {string | null} filename
@@ -147,8 +208,12 @@ export async function storeUploadStream(owner, body, filename) {
   const file = createWriteStream(path, { mode: 0o600 });
   /** @type {{ status: number, error: string } | null} */
   let failure = null;
-  /** @type {ReturnType<typeof sniffMedia>} */
+  /** @type {FileType | null} */
   let type = null;
+  /** Set when the file is not a known binary format, to check it is text as the rest streams in. */
+  const text = textChecker();
+  /** @param {Buffer} start */
+  const recognise = (start) => sniffFile(start) ?? (text.feed(start) ? textType(filename) : null);
   let size = 0;
   /** @type {Buffer[]} */
   let head = [];
@@ -176,17 +241,22 @@ export async function storeUploadStream(owner, body, filename) {
         head.push(chunk);
         const start = Buffer.concat(head);
         if (start.length >= SNIFF_BYTES) {
-          type = sniffMedia(start);
+          type = recognise(start);
           head = [];
           if (!type) {
             rejected = true; // reported as 415 below
             continue;
           }
         }
+      } else if (type.kind === 'text' && !text.feed(chunk)) {
+        type = null; // binary after all: reported as 415 below
+        rejected = true;
+        continue;
       }
       if (!file.write(chunk)) await once(file, 'drain');
     }
-    if (!rejected && !type && head.length) type = sniffMedia(Buffer.concat(head)); // short files
+    if (!rejected && !type && head.length) type = recognise(Buffer.concat(head)); // short files
+    if (type?.kind === 'text' && !text.end()) type = null; // ends inside a character
   } catch (e) {
     failure = { status: 400, error: `Upload interrupted (${e instanceof Error ? e.message : e}).` };
   }
@@ -195,7 +265,12 @@ export async function storeUploadStream(owner, body, filename) {
 
   if (!failure && size === 0) failure = { status: 400, error: 'Empty upload. Send the file as the request body.' };
   if (!failure && !type) {
-    failure = { status: 415, error: 'Only PNG, JPEG, GIF and WebP images and MP4, MOV and WebM videos are accepted.' };
+    failure = {
+      status: 415,
+      error:
+        'Only PNG, JPEG, GIF and WebP images, MP4, MOV and WebM videos, PDFs, and UTF-8 text files ' +
+        '(logs, .txt, .csv, .json, .md, .yaml) are accepted.',
+    };
   }
   if (failure || !type) {
     deleteUploadFile(path);
@@ -213,6 +288,7 @@ export async function storeUploadStream(owner, body, filename) {
     expiresAt: nowSec() + UPLOAD_TTL_SEC,
   };
   uploads.set(id, upload);
+  saveIndex();
   return { ok: true, upload };
 }
 
@@ -228,5 +304,6 @@ export function takeUpload(id, owner) {
   const upload = uploads.get(id);
   if (!upload || upload.owner !== owner) return null;
   uploads.delete(id);
+  saveIndex();
   return upload;
 }

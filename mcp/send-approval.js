@@ -1,15 +1,19 @@
 import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
 import { conversationFor } from '../agent/tools/slack.js';
-import { config } from '../config.js';
+import { config, resolvePath } from '../config.js';
 import { buildSendApprovalBlocks } from '../listeners/views/mcp-send-approval-builder.js';
 import { textResult } from '../utils/helpers.js';
+import { readJsonFile, writeJsonFile } from '../utils/json-file.js';
 import { uploadFileToSlack } from '../utils/slack.js';
+import { deleteUploadFile } from './uploads.js';
 
 // Messages from MCP clients whose sends need approval (clients that may run tools
 // without asking their user, like Grok in always-approve mode) wait here until an
 // owner clicks Send or Discard in Slack. The tool call returns at once; the post
-// happens on the click (listeners/actions/mcp-send-approval.js). Drafts live in
-// memory only: a restart drops them, and their buttons then say so.
+// happens on the click (listeners/actions/mcp-send-approval.js). Drafts are saved
+// in data/ (an attachment's file stays in data/uploads/), so a restart or deploy
+// keeps them and their buttons still work.
 
 /** How long a draft waits for a decision. */
 export const DRAFT_TTL_SEC = 30 * 60;
@@ -27,18 +31,44 @@ const MAX_DRAFTS = 20;
  * @property {number} expiresAt - epoch seconds
  */
 
-/** @type {Map<string, Draft>} */
-const drafts = new Map();
+const DRAFTS_FILE = join(resolvePath(config.dataDir), 'mcp-send-drafts.json');
 const nowSec = () => Math.floor(Date.now() / 1000);
+
+/**
+ * A saved draft's attachment again, with its release (which deletes the file).
+ * @param {Omit<import('../agent/tools/slack.js').SendAttachment, 'release'>} [saved]
+ * @returns {import('../agent/tools/slack.js').SendAttachment | undefined}
+ */
+const revive = (saved) => saved && { ...saved, release: () => deleteUploadFile(saved.path) };
+
+/** @type {Map<string, Draft>} drafts from before a restart included */
+const drafts = new Map(
+  /** @type {Draft[]} */ (readJsonFile(DRAFTS_FILE, { drafts: [] }).drafts || []).map((d) => [
+    d.id,
+    { ...d, attachment: revive(d.attachment) },
+  ]),
+);
+
+function saveDrafts() {
+  const saved = [...drafts.values()].map(({ attachment, ...d }) => {
+    if (!attachment) return d;
+    const { release, ...file } = attachment;
+    return { ...d, attachment: file };
+  });
+  writeJsonFile(DRAFTS_FILE, { drafts: saved }, { mode: 0o600 });
+}
 
 function pruneExpired() {
   const now = nowSec();
+  let changed = false;
   for (const [id, d] of drafts) {
     if (d.expiresAt <= now) {
       drafts.delete(id);
       d.attachment?.release();
+      changed = true;
     }
   }
+  if (changed) saveDrafts();
 }
 
 /**
@@ -66,6 +96,7 @@ export async function requestSendApproval(slack, caller, target, text, attachmen
     expiresAt: nowSec() + DRAFT_TTL_SEC,
   };
   drafts.set(draft.id, draft);
+  saveDrafts();
   // Show an attachment itself first, so the owner can look at or play it before deciding
   if (attachment) {
     const previews = await Promise.allSettled(
@@ -78,6 +109,7 @@ export async function requestSendApproval(slack, caller, target, text, attachmen
       ),
     );
     draft.previewFailed = previews.some((p) => p.status === 'rejected');
+    saveDrafts();
   }
   try {
     await Promise.all(
@@ -92,6 +124,7 @@ export async function requestSendApproval(slack, caller, target, text, attachmen
     );
   } catch (e) {
     drafts.delete(draft.id);
+    saveDrafts();
     attachment?.release();
     return textResult(`Not sent: could not ask the owner for approval in Slack (${e}).`, true);
   }
@@ -110,6 +143,9 @@ export async function requestSendApproval(slack, caller, target, text, attachmen
 export function takeDraft(id) {
   pruneExpired();
   const draft = drafts.get(id) || null;
-  drafts.delete(id);
+  if (draft) {
+    drafts.delete(id);
+    saveDrafts();
+  }
   return draft;
 }

@@ -12,3 +12,6 @@ export const WEBM = Buffer.concat([
   Buffer.from('1a45dfa39f4286810142f7810142f2810442f381084282847765626d', 'hex'),
   Buffer.alloc(64, 3),
 ]);
+
+/** A ZIP archive's start: binary, neither media nor text (uploads refuse it). */
+export const ZIP = Buffer.concat([Buffer.from('504b0304140000000800', 'hex'), Buffer.alloc(80)]);

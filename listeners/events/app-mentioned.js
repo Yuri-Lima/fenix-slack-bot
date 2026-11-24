@@ -59,7 +59,7 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
       return;
     }
 
-    // Files shared with the mention (screenshots are read as images)
+    // Files shared with the mention (screenshots, PDFs and logs are read)
     const files = /** @type {any} */ (event).files;
     if (!cleanedText && !files?.length) {
       await say({

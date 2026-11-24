@@ -1,4 +1,5 @@
 import { baseUrl, config } from '../config.js';
+import { downloadSlackFile } from '../utils/slack.js';
 import { createTokenReader } from '../utils/tokens.js';
 import { httpRequest, requireConfigured } from './http.js';
 
@@ -70,6 +71,43 @@ export async function ytUploadAttachment(idReadable, fileName, content, mimeType
     { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form },
   );
   return res.json();
+}
+
+/** Largest file copied from Slack to an issue. */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Copy files from Slack to an issue: each is downloaded with the bot token and uploaded as an attachment, so the
+ * bytes never pass through the model. Used by the ticket shortcut and the agent's youtrack_attach_files tool.
+ * @param {string} slackToken - the bot token
+ * @param {string} idReadable - e.g. "DEV-123"
+ * @param {Array<{ name: string, mimetype?: string, url: string, size?: number }>} files
+ * @returns {Promise<{ attached: string[], skipped: string[] }>} skipped: "name (reason)"
+ */
+export async function attachSlackFiles(slackToken, idReadable, files) {
+  /** @type {string[]} */
+  const attached = [];
+  /** @type {string[]} */
+  const skipped = [];
+  const limit = `over ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB`;
+  for (const f of files) {
+    try {
+      if ((f.size ?? 0) > MAX_ATTACHMENT_BYTES) {
+        skipped.push(`${f.name} (${limit})`);
+        continue;
+      }
+      const { data } = await downloadSlackFile(slackToken, f.url);
+      if (data.byteLength > MAX_ATTACHMENT_BYTES) {
+        skipped.push(`${f.name} (${limit})`);
+        continue;
+      }
+      await ytUploadAttachment(idReadable, f.name, data, f.mimetype || 'application/octet-stream');
+      attached.push(f.name);
+    } catch (e) {
+      skipped.push(`${f.name} (${e instanceof Error ? e.message : e})`);
+    }
+  }
+  return { attached, skipped };
 }
 
 // ── Custom field payloads ────────────────────────────────────────────────

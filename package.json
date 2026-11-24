@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.296",
+    "@anthropic-ai/sdk": "1.6.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@slack/bolt": "^5.1.0",
     "dotenv": "~18.0.7",

@@ -1,33 +1,44 @@
 import assert from 'node:assert';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-
-import { config } from '../../config.js';
-import { deleteUploadFile, sniffMedia, storeUploadStream, takeUpload } from '../../mcp/uploads.js';
-import { MP4, PNG, WEBM } from '../fixtures/media.js';
+import { config, resolvePath } from '../../config.js';
+import {
+  deleteUploadFile,
+  sniffFile,
+  storeUploadStream,
+  takeUpload,
+  textChecker,
+  textType,
+} from '../../mcp/uploads.js';
+import { MP4, PNG, WEBM, ZIP } from '../fixtures/media.js';
 
 /** A request-like body that yields the buffer in chunks. */
 async function* chunks(/** @type {Buffer} */ data, size = 16) {
   for (let i = 0; i < data.length; i += size) yield data.subarray(i, i + size);
 }
 
-describe('sniffMedia', () => {
+describe('sniffFile', () => {
   it('recognises images and videos by their first bytes', () => {
-    assert.strictEqual(sniffMedia(PNG)?.mimeType, 'image/png');
-    assert.strictEqual(sniffMedia(Buffer.from('ffd8ffe000104a464946', 'hex'))?.ext, 'jpg');
-    assert.strictEqual(sniffMedia(Buffer.from('GIF89a....'))?.ext, 'gif');
-    assert.strictEqual(sniffMedia(Buffer.from('RIFF\x00\x00\x00\x00WEBPVP8 ', 'latin1'))?.ext, 'webp');
-    assert.deepStrictEqual(sniffMedia(MP4), { mimeType: 'video/mp4', ext: 'mp4', kind: 'video' });
-    assert.strictEqual(sniffMedia(Buffer.from('\x00\x00\x00\x14ftypqt  ', 'latin1'))?.mimeType, 'video/quicktime');
-    assert.deepStrictEqual(sniffMedia(WEBM), { mimeType: 'video/webm', ext: 'webm', kind: 'video' });
+    assert.strictEqual(sniffFile(PNG)?.mimeType, 'image/png');
+    assert.strictEqual(sniffFile(Buffer.from('ffd8ffe000104a464946', 'hex'))?.ext, 'jpg');
+    assert.strictEqual(sniffFile(Buffer.from('GIF89a....'))?.ext, 'gif');
+    assert.strictEqual(sniffFile(Buffer.from('RIFF\x00\x00\x00\x00WEBPVP8 ', 'latin1'))?.ext, 'webp');
+    assert.deepStrictEqual(sniffFile(MP4), { mimeType: 'video/mp4', ext: 'mp4', kind: 'video' });
+    assert.strictEqual(sniffFile(Buffer.from('\x00\x00\x00\x14ftypqt  ', 'latin1'))?.mimeType, 'video/quicktime');
+    assert.deepStrictEqual(sniffFile(WEBM), { mimeType: 'video/webm', ext: 'webm', kind: 'video' });
+    assert.deepStrictEqual(sniffFile(Buffer.from('%PDF-1.7\n')), {
+      mimeType: 'application/pdf',
+      ext: 'pdf',
+      kind: 'pdf',
+    });
   });
 
   it('rejects everything else, including AVIF/HEIC stills and Matroska', () => {
-    assert.strictEqual(sniffMedia(Buffer.from('\x00\x00\x00\x1cftypavif', 'latin1')), null);
-    assert.strictEqual(sniffMedia(Buffer.from('\x00\x00\x00\x1cftypheic', 'latin1')), null);
-    assert.strictEqual(sniffMedia(Buffer.concat([Buffer.from('1a45dfa3', 'hex'), Buffer.from('....matroska')])), null);
-    assert.strictEqual(sniffMedia(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>')), null);
-    assert.strictEqual(sniffMedia(Buffer.from('%PDF-1.7')), null);
+    assert.strictEqual(sniffFile(Buffer.from('\x00\x00\x00\x1cftypavif', 'latin1')), null);
+    assert.strictEqual(sniffFile(Buffer.from('\x00\x00\x00\x1cftypheic', 'latin1')), null);
+    assert.strictEqual(sniffFile(Buffer.concat([Buffer.from('1a45dfa3', 'hex'), Buffer.from('....matroska')])), null);
+    assert.strictEqual(sniffFile(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>')), null);
   });
 });
 
@@ -63,7 +74,7 @@ describe('storeUploadStream / takeUpload', () => {
 
   it('refuses empty, oversized, over-total and non-media uploads, leaving no file behind', async () => {
     const statuses = [];
-    for (const body of [Buffer.alloc(0), Buffer.from('hello, not a video at all, just some plain text'.repeat(3))]) {
+    for (const body of [Buffer.alloc(0), ZIP]) {
       const r = await storeUploadStream('grok', chunks(body), 'x.mp4');
       statuses.push(!r.ok && r.status);
     }
@@ -83,5 +94,52 @@ describe('storeUploadStream / takeUpload', () => {
     const third = await storeUploadStream('grok', chunks(near, 64 * 1024), 'n2.mp4');
     assert.strictEqual(!third.ok && third.status, 507);
     for (const u of kept) deleteUploadFile(takeUpload(u.id, 'grok')?.path || u.path);
+  });
+});
+
+describe('text uploads', () => {
+  it('keeps UTF-8 logs, with characters split across chunks, under an allowed extension', async () => {
+    const log = Buffer.from('2026-11-23 10:00:01 ERROR db pool exhausted — retrying ✓\n'.repeat(20));
+    const r = await storeUploadStream('grok', chunks(log, 7), 'app.LOG');
+    assert.ok(r.ok, !r.ok ? r.error : '');
+    assert.deepStrictEqual([r.upload.kind, r.upload.mimeType, r.upload.filename], ['text', 'text/plain', 'app.log']);
+    deleteUploadFile(r.upload.path);
+  });
+
+  it('names unknown text types .txt, so nothing arrives as HTML or SVG', () => {
+    assert.strictEqual(textType('page.html').ext, 'txt');
+    assert.strictEqual(textType('data.csv').ext, 'csv');
+    assert.strictEqual(textType(null).ext, 'txt');
+  });
+
+  it('refuses binary data that starts like text, and text cut inside a character', async () => {
+    const sneaky = Buffer.concat([Buffer.from('a'.repeat(100)), Buffer.from([0, 1, 2, 3])]);
+    const r = await storeUploadStream('grok', chunks(sneaky), 'x.log');
+    assert.ok(!r.ok && r.status === 415, 'NUL after the first bytes');
+    const cut = await storeUploadStream('grok', chunks(Buffer.from([0x61, 0xe2, 0x82])), 'x.txt');
+    assert.ok(!cut.ok && cut.status === 415, 'ends inside a character');
+    const check = textChecker();
+    assert.ok(
+      check.feed(Buffer.from([0xe2, 0x82])) && check.feed(Buffer.from([0xac])) && check.end(),
+      '€ split in two',
+    );
+  });
+
+  it('keeps a PDF by its signature', async () => {
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(100, 0x20)]);
+    const r = await storeUploadStream('grok', chunks(pdf), 'report');
+    assert.ok(r.ok && r.upload.kind === 'pdf' && r.upload.filename === 'report.pdf');
+    deleteUploadFile(r.upload.path);
+  });
+
+  it('saves waiting uploads, so a restart keeps them', async () => {
+    const r = await storeUploadStream('grok', chunks(PNG), 'shot.png');
+    assert.ok(r.ok);
+    const saved = JSON.parse(readFileSync(join(resolvePath(config.dataDir), 'mcp-uploads.json'), 'utf-8'));
+    assert.ok(saved.uploads.some((/** @type {any} */ u) => u.id === r.upload.id && u.owner === 'grok'));
+    takeUpload(r.upload.id, 'grok');
+    const after = JSON.parse(readFileSync(join(resolvePath(config.dataDir), 'mcp-uploads.json'), 'utf-8'));
+    assert.ok(!after.uploads.some((/** @type {any} */ u) => u.id === r.upload.id), 'taken uploads leave the list');
+    deleteUploadFile(r.upload.path);
   });
 });

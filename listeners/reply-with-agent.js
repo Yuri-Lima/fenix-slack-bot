@@ -1,6 +1,6 @@
 import { runFenixAgent } from '../agent/index.js';
 import { sessionStore } from '../thread-context/index.js';
-import { readSlackImages } from '../utils/slack.js';
+import { readSlackFiles } from '../utils/slack.js';
 import { budgetNote } from '../utils/usage-budget.js';
 import { formatUsageFooter } from '../utils/usage-report.js';
 import { monthToDate } from '../utils/usage-store.js';
@@ -29,7 +29,7 @@ const LOADING_MESSAGES = [
  * @param {string | null | undefined} opts.existingSessionId
  * @param {Function} opts.setStatus
  * @param {Function} opts.sayStream
- * @param {Parameters<typeof readSlackImages>[1]} [opts.files] - Files attached to the message; images are read
+ * @param {Parameters<typeof readSlackFiles>[1]} [opts.files] - Files attached to the message; images, PDFs and text are read
  */
 export async function replyWithAgent({
   text,
@@ -46,9 +46,11 @@ export async function replyWithAgent({
 }) {
   await setStatus({ status: 'Thinking…', loading_messages: LOADING_MESSAGES });
 
-  const { images, skipped } = await readSlackImages(client, files);
+  const { attachments, skipped } = await readSlackFiles(client, files);
+  const cut = attachments.filter((a) => a.note).map((a) => `${a.name}: ${a.note}`);
   const prompt = [
-    text || (images.length ? '(No text; see the attached images.)' : ''),
+    text || (attachments.length ? '(No text; see the attached files.)' : ''),
+    cut.length ? `[Long files, cut to their end: ${cut.join('; ')}. Say so if it matters.]` : '',
     skipped.length ? `[Attachments you could not read: ${skipped.join('; ')}]` : '',
   ]
     .filter(Boolean)
@@ -61,7 +63,7 @@ export async function replyWithAgent({
     usage,
     threadTotals,
   } = await runFenixAgent(prompt, existingSessionId ?? undefined, deps, {
-    images,
+    attachments,
     threadTotals: existingSessionId ? sessionStore.getTotals(channelId, threadTs) : null,
   });
 

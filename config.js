@@ -16,6 +16,8 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {string[]} ownerIds - Slack user IDs of the owners: full access, admin tools and approvals
  * @property {string[]} allowedUserIds - Other Slack user IDs that may ask Fenix (no admin tools or commands)
  * @property {string} ownerName - Name shown in access-denied and error messages
+ * @property {string | null} ownerTitle - How Fenix addresses an owner in replies to them, e.g. "my lord"; null for
+ *   no title
  * @property {string | null} adminDmChannel - DM channel where messages from non-owners are forwarded
  * @property {{ url: string | null, botId: string | null, keyConfigs: BuildConfigHint[] }} teamcity
  * @property {{ url: string | null, project: string | null, defaultBranch: string }} gitlab
@@ -27,8 +29,8 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {{ enabled: boolean, host: string, port: number, path: string, publicUrl: string | null, oauthRedirectUris: string[], cimdOrigins: string[], maxUploadMb: number, maxUploadTotalMb: number }} mcp
  *   MCP server (read-only tools). Static bearer FENIX_MCP_TOKEN for Claude Code; OAuth with Slack approval for
  *   Claude app connectors when publicUrl is set (only redirect URIs listed in oauthRedirectUris may register).
- * @property {{ retentionMonths: number, budgets: UsageBudgets }} usage - Agent usage log: monthly files kept for this
- *   many months, and the spending limits checked before each agent reply
+ * @property {{ retentionMonths: number, budgets: UsageBudgets, billing: UsageBilling }} usage - Agent usage log: monthly
+ *   files kept for this many months, the spending limits checked before each agent reply, and the bill they follow
  * @property {string} timeZone - IANA time zone for times shown in Slack (alerts use it too)
  * @property {string} dataDir - Directory for persisted state (feedback, failure log), relative to the project root
  */
@@ -47,12 +49,21 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  *   ID -> own limits; `until` ("YYYY-MM-DD", in timeZone) is the last day they apply, after which the defaults do
  */
 
+/**
+ * Anthropic's bill for Fenix's API key(s), used to turn cost estimates into billed dollars (utils/billing.js).
+ * Off until apiKeyIds is set and an Admin API key is in ANTHROPIC_ADMIN_KEY or ~/.anthropic_admin_key.
+ * @typedef {Object} UsageBilling
+ * @property {string[]} apiKeyIds - IDs ("apikey_...") of the Anthropic API keys only Fenix uses
+ * @property {number} refreshHours - How often the bill is fetched
+ */
+
 /** @type {FenixConfig} */
 const DEFAULTS = {
   teamName: 'the engineering team',
   ownerIds: [],
   allowedUserIds: [],
   ownerName: 'the bot owner',
+  ownerTitle: null,
   adminDmChannel: null,
   teamcity: { url: null, botId: null, keyConfigs: [] },
   gitlab: { url: null, project: null, defaultBranch: 'main' },
@@ -71,6 +82,7 @@ const DEFAULTS = {
       warnAt: 0.8,
       perUser: {},
     },
+    billing: { apiKeyIds: [], refreshHours: 6 },
   },
   mcp: {
     enabled: false,
@@ -108,6 +120,7 @@ function loadConfig() {
       ...DEFAULTS.usage,
       ...file.usage,
       budgets: { ...DEFAULTS.usage.budgets, ...file.usage?.budgets },
+      billing: { ...DEFAULTS.usage.billing, ...file.usage?.billing },
     },
     mcp: { ...DEFAULTS.mcp, ...file.mcp },
   };

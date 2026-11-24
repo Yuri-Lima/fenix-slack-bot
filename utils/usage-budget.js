@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { calibration } from './billing.js';
 import { budgetOverrides } from './budget-overrides-store.js';
 import { money } from './helpers.js';
 import { isOwner } from './input-guard.js';
@@ -7,7 +8,8 @@ import { localDay, monthKey, spendByUser } from './usage-store.js';
 // Spending limits checked before each agent reply (config.usage.budgets). Spend comes from the usage log's
 // in-memory totals, so a check costs no tokens and no file read. Owners are never blocked; everyone else
 // has a daily and a monthly limit of their own and shares the team's monthly limit. Every reply, owners'
-// included, is capped by the SDK's maxBudgetUsd.
+// included, is capped by the SDK's maxBudgetUsd. Limits are in billed dollars: once Anthropic's bill is synced
+// (utils/billing.js), every estimate is multiplied by the calibration factor before it is compared.
 
 /** The smallest cap a reply gets, so a nearly used budget still allows one short answer. */
 export const MIN_REPLY_USD = 0.1;
@@ -143,7 +145,7 @@ export function evaluateBudget({ owner, limits, spent, teamUsd, threadCostUsd, n
  * @param {Map<string, { monthUsd: number, dayUsd: number }>} spend
  * @returns {number}
  */
-function teamSpend(spend) {
+export function teamSpend(spend) {
   let usd = 0;
   for (const [id, u] of spend) if (!isOwner(id)) usd += u.monthUsd;
   return usd;
@@ -156,14 +158,30 @@ function teamSpend(spend) {
  * @returns {BudgetVerdict}
  */
 export function checkBudget(userId, threadCostUsd = 0) {
-  const spend = spendByUser();
-  return evaluateBudget({
+  const { spend, factor } = billedSpend();
+  const verdict = evaluateBudget({
     owner: isOwner(userId),
     limits: limitsFor(userId),
     spent: spend.get(userId) || { dayUsd: 0, monthUsd: 0 },
     teamUsd: teamSpend(spend),
-    threadCostUsd,
+    threadCostUsd: threadCostUsd * factor,
   });
+  // The SDK enforces the reply cap on its own estimate, so the billed cap goes back into estimated dollars
+  return verdict.ok && verdict.maxUsd !== undefined ? { ok: true, maxUsd: verdict.maxUsd / factor } : verdict;
+}
+
+/**
+ * Spend per person this month and today in billed dollars: the estimates times the calibration factor.
+ * @returns {{ spend: Map<string, { monthUsd: number, dayUsd: number }>, factor: number }}
+ */
+export function billedSpend() {
+  const { factor } = calibration();
+  const spend = spendByUser();
+  for (const u of spend.values()) {
+    u.monthUsd *= factor;
+    u.dayUsd *= factor;
+  }
+  return { spend, factor };
 }
 
 /**
@@ -175,7 +193,7 @@ export function checkBudget(userId, threadCostUsd = 0) {
 export function budgetNote(userId, threadCostUsd = 0) {
   if (isOwner(userId)) return null;
   const b = config.usage.budgets;
-  const spend = spendByUser();
+  const { spend, factor } = billedSpend();
   const mine = spend.get(userId) || { dayUsd: 0, monthUsd: 0 };
   const limits = limitsFor(userId);
   /** @type {string[]} */
@@ -188,7 +206,7 @@ export function budgetNote(userId, threadCostUsd = 0) {
   check(limits.dailyUsd, mine.dayUsd, 'budget today');
   check(limits.monthlyUsd, mine.monthUsd, 'budget this month');
   check(b.teamMonthlyUsd, teamSpend(spend), 'team budget');
-  check(b.threadMaxUsd, threadCostUsd, 'this thread');
+  check(b.threadMaxUsd, threadCostUsd * factor, 'this thread');
   return notes.length ? `:hourglass: ${notes.join(' · ')}` : null;
 }
 

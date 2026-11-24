@@ -1,3 +1,4 @@
+import { billedBetween, billingState, calibration } from './billing.js';
 import { compact, money } from './helpers.js';
 import { localDay, readRange, totalTokens } from './usage-store.js';
 
@@ -122,6 +123,16 @@ function percentile(values, p) {
  * @property {Array<{ name: string, calls: number }>} tools
  * @property {Array<{ ts: string, user: string, model: string, tokens: number, costUsd: number, turns: number, tools: string }>} costliest
  * @property {Record<string, number>} analyses - Rule-based runs (no tokens) by kind
+ * @property {BilledComparison | null} [billed] - Anthropic's bill for the period, when billing is synced
+ */
+
+/**
+ * What Anthropic billed for the part of a period its data covers, next to Fenix's estimate for the same time.
+ * @typedef {Object} BilledComparison
+ * @property {number} billedUsd
+ * @property {number} estimatedUsd
+ * @property {string} through - ISO time the bill is complete up to (the period's end if earlier)
+ * @property {number} factor - the calibration factor the budgets use now
  */
 
 /**
@@ -238,7 +249,47 @@ export function aggregateUsage(records, label) {
 export function usageStatsFor(periodArg) {
   const period = parsePeriod(periodArg);
   if (!period) return null;
-  return aggregateUsage(readRange(period.from, period.to), period.label);
+  const records = readRange(period.from, period.to);
+  return { ...aggregateUsage(records, period.label), billed: compareWithBill(records, period.from, period.to) };
+}
+
+/**
+ * The bill for the complete UTC days of a period that Anthropic's data covers, and Fenix's estimate for the same
+ * days (every run except MCP tool calls); null when billing is not synced or covers none of the period.
+ * @param {UsageRecord[]} records - the period's records
+ * @param {Date} from
+ * @param {Date} to
+ * @returns {BilledComparison | null}
+ */
+export function compareWithBill(records, from, to) {
+  const { refreshedAt } = billingState();
+  if (!refreshedAt) return null;
+  // Whole UTC days only: the first full day of the period up to the last day the bill has complete
+  const firstDay = new Date(Math.ceil(from.getTime() / 86_400_000) * 86_400_000);
+  const end = new Date(Math.min(to.getTime(), Math.floor(Date.parse(refreshedAt) / 86_400_000) * 86_400_000));
+  if (end <= firstDay) return null;
+  const lastDay = new Date(end.getTime() - 86_400_000).toISOString().slice(0, 10);
+  return {
+    billedUsd: billedBetween(firstDay.toISOString().slice(0, 10), lastDay),
+    estimatedUsd: records
+      .filter((r) => r.kind !== 'mcp' && r.ts >= firstDay.toISOString() && r.ts < end.toISOString())
+      .reduce((sum, r) => sum + r.costUsd, 0),
+    through: end.toISOString(),
+    factor: calibration().factor,
+  };
+}
+
+/**
+ * One line comparing the bill with the estimates, for the report and the usage_report tool.
+ * @param {BilledComparison} b
+ * @returns {string}
+ */
+export function billedLine(b) {
+  const day = b.through.slice(0, 10);
+  return (
+    `Billed by Anthropic ${money(b.billedUsd)} for full days through ${day} (UTC), where Fenix estimated ` +
+    `${money(b.estimatedUsd)}; budgets count estimates ×${b.factor.toFixed(2)}.`
+  );
 }
 
 /**
@@ -269,6 +320,7 @@ export function formatUsageSummary(s) {
         .map(([k, v]) => `${k} ${v}`)
         .join(', ') || 'none'
     }.`,
+    s.billed ? billedLine(s.billed) : "Costs are the Agent SDK's estimates (Anthropic billing is not synced).",
   ];
   return lines.join('\n');
 }

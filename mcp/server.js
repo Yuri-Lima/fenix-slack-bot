@@ -75,7 +75,7 @@ export function isAuthorized(header, token) {
 }
 
 /**
- * The shell command a connection runs to upload an image or video (bytes never pass through the model).
+ * The shell command a connection runs to upload a file to attach (bytes never pass through the model).
  * Token files follow the setup convention: ~/.fenix_mcp_token for Claude Code, ~/.fenix_mcp_token_<client> otherwise.
  * @param {string} base - public origin of the endpoint
  * @param {string} clientName
@@ -85,7 +85,8 @@ export function uploadHint(base, clientName) {
   const tokenFile = clientName === STATIC_CLIENT_NAME ? '~/.fenix_mcp_token' : `~/.fenix_mcp_token_${clientName}`;
   return (
     `curl -sS -T <path to file> "${base}/uploads?filename=<file name>" -H "Authorization: Bearer $(cat ${tokenFile})"` +
-    ` (PNG, JPEG, GIF, WebP, MP4, MOV or WebM up to ${config.mcp.maxUploadMb} MB; replies {"upload_id": ...}, ` +
+    ` (PNG, JPEG, GIF, WebP, MP4, MOV, WebM, PDF or a UTF-8 text/log file up to ${config.mcp.maxUploadMb} MB; ` +
+    'replies {"upload_id": ...}, ' +
     'valid 1 hour)'
   );
 }

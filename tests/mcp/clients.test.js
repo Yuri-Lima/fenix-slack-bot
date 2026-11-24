@@ -13,7 +13,7 @@ const { flushUsage, monthKey, readMonth } = await import('../../utils/usage-stor
 const { DISCARD_ACTION, SEND_ACTION } = await import('../../listeners/views/mcp-send-approval-builder.js');
 
 const OWNER = 'U0OWNER';
-const { MP4, PNG } = await import('../fixtures/media.js');
+const { MP4, PNG, ZIP } = await import('../fixtures/media.js');
 const { createServer } = await import('node:http');
 const { existsSync, readdirSync } = await import('node:fs');
 const { join } = await import('node:path');
@@ -195,7 +195,7 @@ describe('MCP endpoint with named clients', () => {
     await click(SEND_ACTION); // a draft is decided once
     assert.match(
       JSON.stringify(slack.chat.update.mock.calls.at(-1).arguments[0].blocks),
-      /expired, was already decided/,
+      /expired or was already decided/,
     );
     assert.strictEqual(slack.chat.postMessage.mock.callCount(), before + 2);
     await client.close();
@@ -245,7 +245,7 @@ describe('MCP endpoint with named clients', () => {
     return { status: r.status, body: await r.json() };
   };
 
-  it('accepts image and video uploads only from connections that can send, and only real media', async () => {
+  it('accepts uploads only from connections that can send, and only files it can recognise', async () => {
     const image = await upload(tokens.sender, PNG);
     assert.strictEqual(image.status, 201);
     assert.match(image.body.upload_id, /^up_/);
@@ -257,10 +257,7 @@ describe('MCP endpoint with named clients', () => {
     assert.deepStrictEqual([video.status, video.body.kind, video.body.filename], [201, 'video', 'demo.mp4']);
 
     assert.strictEqual((await upload(tokens.reader, PNG)).status, 403);
-    assert.strictEqual(
-      (await upload(tokens.sender, Buffer.from('not an image or a video, just text'.repeat(3)))).status,
-      415,
-    );
+    assert.strictEqual((await upload(tokens.sender, ZIP)).status, 415);
     const anon = await fetch(`${base}/uploads`, { method: 'POST', body: PNG });
     assert.strictEqual(anon.status, 401);
   });
@@ -270,7 +267,7 @@ describe('MCP endpoint with named clients', () => {
     const tool = (await client.listTools()).tools.find((t) => t.name === 'slack_send_message');
     assert.match(tool?.description || '', /curl -sS -T <path to file> "https:\/\/fenix-mcp\.example\.com\/uploads/);
     assert.match(tool?.description || '', /~\/\.fenix_mcp_token_srv-sender/);
-    assert.match(tool?.description || '', /MP4, MOV or WebM up to 200 MB/);
+    assert.match(tool?.description || '', /MP4, MOV, WebM, PDF or a UTF-8 text\/log file up to 200 MB/);
 
     const { body } = await upload(tokens.sender, MP4, 'demo.mp4');
     const r = await client.callTool({

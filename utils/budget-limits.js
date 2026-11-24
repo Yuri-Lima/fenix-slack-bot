@@ -2,8 +2,8 @@ import { config } from '../config.js';
 import { budgetOverrides, removeBudgetOverride, setBudgetOverride } from './budget-overrides-store.js';
 import { money } from './helpers.js';
 import { isAllowed, isOwner } from './input-guard.js';
-import { limitSource, limitsFor } from './usage-budget.js';
-import { localDay, spendByUser } from './usage-store.js';
+import { billedSpend, limitSource, limitsFor, teamSpend } from './usage-budget.js';
+import { localDay } from './usage-store.js';
 
 // Owners change a person's spending limits by asking: the budget_limits agent tool and the `limit` command
 // (no AI tokens, so it also works while the API credits are used up) both use these functions, and both
@@ -102,7 +102,7 @@ export function describeLimits({ id, name }, now = new Date()) {
     const after = new Date(Date.parse(`${src.until}T12:00:00Z`) + 86_400_000);
     parts.push(`until ${shortDay(src.until)}, then ${limitsText(limitsFor(id, after))}`);
   }
-  const spent = spendByUser().get(id) || { dayUsd: 0, monthUsd: 0 };
+  const spent = billedSpend().spend.get(id) || { dayUsd: 0, monthUsd: 0 };
   const access = isAllowed(id) ? '' : ' Not on the access list, so they cannot ask Fenix yet.';
   return (
     `${name}: ${limitsText(limits)}${parts.length ? ` (${parts.join('; ')})` : ' (default)'}. ` +
@@ -175,8 +175,7 @@ export function resetLimits(person, now = new Date()) {
  */
 export async function listLimits(nameOf, now = new Date()) {
   const b = config.usage.budgets;
-  let teamUsd = 0;
-  for (const [id, u] of spendByUser()) if (!isOwner(id)) teamUsd += u.monthUsd;
+  const teamUsd = teamSpend(billedSpend().spend);
   const header =
     `Defaults: ${limitsText({ dailyUsd: b.userDailyUsd, monthlyUsd: b.userMonthlyUsd })} per person; ` +
     `team ${b.teamMonthlyUsd === null ? 'no limit' : `${money(b.teamMonthlyUsd)} a month`} (used ${money(teamUsd)}); ` +

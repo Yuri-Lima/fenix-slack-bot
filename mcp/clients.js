@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { config, resolvePath } from '../config.js';
+import { writeJsonFile } from '../utils/json-file.js';
 
 // Named MCP clients (Cursor, Grok, ...), each with its own bearer token and
 // scopes, so connections can be told apart, limited and revoked one by one.
@@ -61,9 +62,7 @@ function readStore() {
 
 /** @param {Record<string, McpClient>} clients */
 function writeStore(clients) {
-  mkdirSync(dirname(STORE_FILE), { recursive: true });
-  writeFileSync(`${STORE_FILE}.tmp`, JSON.stringify({ clients }, null, 2), { encoding: 'utf-8', mode: 0o600 });
-  renameSync(`${STORE_FILE}.tmp`, STORE_FILE);
+  writeJsonFile(STORE_FILE, { clients }, { mode: 0o600 });
 }
 
 /**

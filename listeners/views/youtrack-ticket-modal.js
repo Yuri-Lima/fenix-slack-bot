@@ -1,15 +1,10 @@
-import { FETCH_TIMEOUT_MS } from '../../integrations/http.js';
 import {
+  attachSlackFiles,
   issueUrl as buildIssueUrl,
   createIssue,
   DEFAULT_PRIORITY,
   DEFAULT_TYPE,
-  ytUploadAttachment,
 } from '../../integrations/youtrack.js';
-
-const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-/** Slack file downloads can be large, so they get a longer timeout than API calls. */
-const DOWNLOAD_TIMEOUT_MS = 2 * FETCH_TIMEOUT_MS;
 
 /**
  * Handle the YouTrack ticket modal submission.
@@ -38,40 +33,13 @@ export async function handleYouTrackTicketModal({ ack, body, client, context, lo
     const issue = await createIssue({ summary, description, type, priority });
     const issueUrl = buildIssueUrl(issue.idReadable);
 
-    // Upload Slack file attachments to the YouTrack issue
+    // Upload Slack file attachments to the YouTrack issue (same bot token Bolt uses for this request)
     let uploadedCount = 0;
-    if (files?.length) {
-      // Same bot token Bolt uses for this request; url_private needs it
-      const slackToken = context.botToken;
-      if (slackToken) {
-        for (const file of files) {
-          try {
-            if (file.size && file.size > MAX_ATTACHMENT_BYTES) {
-              logger.warn(`Skipping ${file.name}: ${(file.size / 1024 / 1024).toFixed(1)}MB exceeds 10MB limit`);
-              continue;
-            }
-            const dlRes = await fetch(file.url, {
-              headers: { Authorization: `Bearer ${slackToken}` },
-              signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-            });
-            if (!dlRes.ok) {
-              logger.warn(`Failed to download Slack file ${file.name}: ${dlRes.status}`);
-              continue;
-            }
-            const buffer = Buffer.from(await dlRes.arrayBuffer());
-            if (buffer.byteLength > MAX_ATTACHMENT_BYTES) {
-              logger.warn(
-                `Skipping ${file.name}: downloaded size ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB exceeds 10MB limit`,
-              );
-              continue;
-            }
-            await ytUploadAttachment(issue.idReadable, file.name, buffer, file.mimetype);
-            uploadedCount++;
-          } catch (err) {
-            logger.warn(`Error processing file ${file.name}: ${err.message}`);
-          }
-        }
-      }
+    const slackToken = context.botToken;
+    if (files?.length && slackToken) {
+      const { attached, skipped } = await attachSlackFiles(slackToken, issue.idReadable, files);
+      uploadedCount = attached.length;
+      for (const why of skipped) logger.warn(`Not attached to ${issue.idReadable}: ${why}`);
     }
 
     const userId = body.user.id;

@@ -26,7 +26,7 @@ function quotedSections(text) {
 }
 
 /**
- * The draft's body: its text quoted, and its image or video named (the file itself is previewed just above).
+ * The draft's body: its text quoted, and its attachment named (the file itself is previewed just above).
  * @param {import('../../mcp/send-approval.js').Draft} draft
  * @returns {Block[]}
  */
@@ -35,7 +35,9 @@ function draftBody(draft) {
   const blocks = draft.text ? quotedSections(draft.text) : [];
   if (draft.attachment) {
     const { kind, filename, size } = draft.attachment;
-    const icon = kind === 'video' ? ':film_frames:' : ':frame_with_picture:';
+    const icon = { image: ':frame_with_picture:', video: ':film_frames:', pdf: ':page_facing_up:', text: ':scroll:' }[
+      kind
+    ];
     const preview = draft.previewFailed ? 'the preview could not be shown' : 'preview above';
     blocks.push({
       type: 'context',
@@ -106,7 +108,7 @@ export function buildSendDecisionBlocks(draft, outcome, userId, result = '') {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: ':hourglass: This draft expired, was already decided, or Fenix restarted since. Nothing was posted.',
+          text: ':hourglass: This draft expired or was already decided. Nothing was posted.',
         },
       },
     ];

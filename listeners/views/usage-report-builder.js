@@ -1,4 +1,4 @@
-import { compact, money } from '../../utils/usage-report.js';
+import { billedLine, compact, money } from '../../utils/usage-report.js';
 
 /** @typedef {import('@slack/types').KnownBlock} Block */
 
@@ -56,6 +56,8 @@ export function buildUsageReportBlocks(s) {
       `:stopwatch: *Reply time*\np50 ${secs(s.perReply.p50Ms)} · p95 ${secs(s.perReply.p95Ms)}`,
     ].map((text) => ({ type: 'mrkdwn', text })),
   });
+
+  if (s.billed) blocks.push(context(`:bank: ${billedLine(s.billed)}`));
 
   if (s.byModel.length) {
     blocks.push(

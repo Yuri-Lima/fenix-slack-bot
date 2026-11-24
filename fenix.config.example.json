@@ -3,6 +3,7 @@
   "ownerIds": ["U0123456789"],
   "allowedUserIds": ["U0987654321"],
   "ownerName": "Jane",
+  "ownerTitle": "boss",
   "adminDmChannel": "D0123456789",
   "teamcity": {
     "url": "https://teamcity.example.com",
@@ -58,6 +59,10 @@
           "monthlyUsd": 50
         }
       }
+    },
+    "billing": {
+      "apiKeyIds": ["apikey_01ExampleExampleExample"],
+      "refreshHours": 6
     }
   }
 }
