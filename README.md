@@ -62,6 +62,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | **App Home** | Open the Home tab | A summary of what Fenix can do and how to reach it. |
 | **Assistant panel** | *Add Agent → Fenix* | Suggested prompts for builds, flaky tests, and tickets. |
 | **Message shortcut** | ⋯ → *Create YouTrack Ticket* | Opens a ticket form pre-filled from the message. |
+| **Message shortcut** | ⋯ → *Translate message* | Owners in `translate.userIds`: translates the message from any language into theirs, in a window only they see (see *Translations*). |
 
 ### Commands
 
@@ -276,6 +277,10 @@ The owner's own messages are never translated. Mentions in a translation are pla
 Each batch is one call to Claude Haiku 5.5 (`agent/translate.js`, no thinking), which also decides which messages are German; messages that are clearly English are skipped without a call (`mightBeGerman()`). A batch costs a fraction of a cent. It is logged as the owner's agent usage with the tool `translate`. Message text is kept only until its batch is translated; the settings live in `data/translate-prefs.json`.
 
 Fenix sees only the channels it is a member of; invite it to a channel to translate there.
+
+### Translate message shortcut
+
+To translate one message on demand, open its ⋯ menu (or *Connect to apps*) and pick **Translate message**. A window that only you see shows the translation into your language (English unless you chose Portuguese with `translate pt`) from any language, not only German, with a button for the other language. It works in any conversation, including DMs and channels Fenix is not in, because Slack sends the message's text with the shortcut. Messages longer than 2,500 characters are translated up to that point. It is for owners in `translate.userIds`; anyone else is told it is not set up for them.
 
 ## Usage tracking
 
@@ -571,7 +576,7 @@ conventions, goes here. See [`prompts/context.example.md`](prompts/context.examp
 ### Slack app
 
 [`manifest.json`](manifest.json) is the version-controlled definition of the app: Socket Mode, the App Home and
-Messages tabs, the agent view, the *Create YouTrack Ticket* shortcut, the bot scopes, and the bot events
+Messages tabs, the agent view, the *Create YouTrack Ticket* and *Translate message* shortcuts, the bot scopes, and the bot events
 `app_mention`, `app_home_opened`, `message.channels`, `message.groups`, and `message.im`. Create the app from it at
 [api.slack.com/apps](https://api.slack.com/apps) (*From a manifest*), install it to your workspace, and invite Fenix
 to the channels where TeamCity posts.
@@ -658,7 +663,7 @@ WantedBy=multi-user.target
 ├── listeners/
 │   ├── events/                  # DMs, mentions, @Fenix delete, TeamCity failure analysis, translations
 │   ├── actions/                 # Feedback, approval and translation buttons
-│   ├── shortcuts/               # Create YouTrack Ticket
+│   ├── shortcuts/               # Create YouTrack Ticket, Translate message
 │   └── views/                   # App Home and modals
 ├── thread-context/              # Thread → agent session store
 ├── utils/                       # Input guard, stores, Slack helpers, token readers

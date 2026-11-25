@@ -130,6 +130,7 @@ describe('handleTranslateWatch', () => {
     assert.deepStrictEqual(translateMessages.mock.calls[0].arguments, [
       [{ author: 'Name-U0ANNA', text: 'Zweite' }],
       'pt-BR',
+      {},
     ]);
 
     setPrefs(OWNER, { on: false }, threadKey('C1', '1.0'));
@@ -197,6 +198,7 @@ describe('translation buttons', () => {
     assert.deepStrictEqual(translateMessages.mock.calls[0].arguments, [
       [{ author: 'Name-U0A', text: 'Wer fixt das?' }],
       'pt-BR',
+      {},
     ]);
     const update = client.chat.update.mock.calls[0].arguments[0];
     assert.strictEqual(update.ts, '9.0');

@@ -119,10 +119,11 @@ const checkable = (text) =>
  * @param {SourceMessage[]} items
  * @param {import('../../utils/translate-prefs.js').TranslateLanguage} language
  * @param {string} personId
+ * @param {{ anyLanguage?: boolean }} [options] - see translateMessages
  * @returns {Promise<{ shown: import('../views/translation-builder.js').TranslatedMessage[], ts: string[] }>} the
- *   German messages, translated, and their ts
+ *   messages that needed translating, translated, and their ts
  */
-export async function translateFor(client, items, language, personId) {
+export async function translateFor(client, items, language, personId, options = {}) {
   const userName = await resolveUserName(client, personId);
   const base = {
     kind: /** @type {const} */ ('agent'),
@@ -138,7 +139,7 @@ export async function translateFor(client, items, language, personId) {
         text: await plainMentions(client, m.text),
       })),
     );
-    const result = await translateMessages(messages, language);
+    const result = await translateMessages(messages, language, options);
     await recordUsage({
       ...base,
       outcome: 'ok',

@@ -1,3 +1,5 @@
+import { TRANSLATE_SHORTCUT } from '../views/translation-builder.js';
+import { handleTranslateShortcut } from './translate-message.js';
 import { handleYouTrackShortcut } from './youtrack-ticket.js';
 
 /**
@@ -7,4 +9,5 @@ import { handleYouTrackShortcut } from './youtrack-ticket.js';
  */
 export function register(app) {
   app.shortcut('create_youtrack_ticket', handleYouTrackShortcut);
+  app.shortcut(TRANSLATE_SHORTCUT, handleTranslateShortcut);
 }

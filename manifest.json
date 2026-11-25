@@ -24,6 +24,12 @@
         "type": "message",
         "callback_id": "create_youtrack_ticket",
         "description": "Create a YouTrack ticket from this message"
+      },
+      {
+        "name": "Translate message",
+        "type": "message",
+        "callback_id": "translate_message",
+        "description": "Translate this message into English or Portuguese"
       }
     ]
   },
