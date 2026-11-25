@@ -46,6 +46,7 @@ for this and assign it to me"* get answered in the thread where they were asked.
 | 📝 | **"Create YouTrack Ticket" shortcut** | Message shortcut that turns any Slack message (and its surrounding context) into a pre-filled ticket. |
 | 📊 | **Usage tracking and budgets** | Every agent reply ends with its model, tokens, cost and steps, plus the month to date. Every run is logged to a monthly file, and `report` gives a full usage report computed in code (no AI tokens). Daily, monthly and team spending limits keep the team from using up the API credits. |
 | 🔌 | **Claude Code connection (MCP)** | An authenticated MCP endpoint serves Fenix's read-only tools (TeamCity, flaky tests, server health and logs, codebase, YouTrack search, usage) to Claude Code, plus `slack_send_message` for the owner, so Claude can write a message and post it as Fenix. All service tokens stay on the Fenix server. |
+| 🌍 | **German translation for owners** | For owners who do not read German (`translate.userIds`): German messages in threads they write in or are mentioned in are translated in the thread with a mention, into English or Brazilian Portuguese, with a button to switch language or stop. |
 | 🧹 | **Thread cleanup** | `@Fenix delete` removes every message Fenix posted in a thread. |
 | 💬 | **Feedback loop** | 👍/👎 buttons on every answer plus conversational feedback capture, stored for the owner to review. |
 | 🛡️ | **Guardrails** | Owner allowlist, prompt-injection and credential-probing detection with strikes, a strict tool allowlist, and redaction rules. |
@@ -68,6 +69,8 @@ for this and assign it to me"* get answered in the thread where they were asked.
 |---|---|---|
 | `limits` / `limit @name 5/day [50/month] [until end of month]` / `limit @name reset` (DM, or after `@Fenix`) | Owners | Show everyone's spending limits and spend, or change one person's (see *Budgets*). Run in code, so it works even while the API credits are used up. |
 | `report [period]` (DM) / `@Fenix report [period]` | Owners | Full usage report: replies, tokens, cost, cache share, per-reply averages and p50/p95 time, by model, user, day and tool, costliest replies, and rule-based analyses. Period: `7d`, `24h`, `last-month`, `2026-10`; default this month. Built in code, so it costs no AI tokens. |
+| `translate` / `translate pt` / `translate en` / `translate off` / `translate on` (DM) | Owners in `translate.userIds` | Show or change your translation settings: the language, or stop and resume everywhere. Run in code (no AI tokens). See *Translations*. |
+| `@Fenix translate pt` / `en` / `off` / `on` (in a thread) | Owners in `translate.userIds` | The same for that thread only; the answer is shown only to you. |
 | `@Fenix delete` | Owners | Deletes every message Fenix posted in the current thread (parent included, if Fenix posted it), then confirms privately. Anyone else is ignored silently. |
 
 ## Tool catalog
@@ -255,6 +258,24 @@ that is already excluded changes its end (*"keep alpha ignored until Friday"*). 
 `data/grafana-ignore-hosts.json`, so deploys keep them; parts in
 `fenix.config.json` can only be removed there. It is offered to owners in Slack and to the owner's Claude Code
 connection (`FENIX_MCP_TOKEN`), not to clients that need Slack approval.
+
+## Translations
+
+For owners who do not read German, listed in `translate.userIds`. In the channels Fenix is in, a German message is translated for such an owner when it is:
+
+- in a thread they wrote in or were mentioned in, or
+- a top-level message that mentions them (the translation goes in its thread).
+
+Messages that arrive within `batchSeconds` of each other in a thread are translated together. The reply mentions the owner, shows each message as `*Author:* translation`, and has two buttons that only that owner can use:
+
+- **🇧🇷 Português** / **🇬🇧 English** translates the same messages again into the other language and keeps it for the thread.
+- **Stop in this thread** stops translations there.
+
+The owner's own messages are never translated. Mentions in a translation are plain names, so translations notify only the owner they are for. English is the default; `translate pt` in a DM switches to Brazilian Portuguese everywhere, and `@Fenix translate pt` in a thread switches only that thread (see *Commands*).
+
+Each batch is one call to Claude Haiku 5.5 (`agent/translate.js`, no thinking), which also decides which messages are German; messages that are clearly English are skipped without a call (`mightBeGerman()`). A batch costs a fraction of a cent. It is logged as the owner's agent usage with the tool `translate`. Message text is kept only until its batch is translated; the settings live in `data/translate-prefs.json`.
+
+Fenix sees only the channels it is a member of; invite it to a channel to translate there.
 
 ## Usage tracking
 
@@ -535,6 +556,7 @@ cp fenix.config.example.json fenix.config.json
 | `usage.retentionMonths` | Months of usage logs to keep (default 12). |
 | `usage.budgets` | Spending limits for people other than owners, and per reply: `userDailyUsd`, `userMonthlyUsd`, `teamMonthlyUsd`, `threadMaxUsd`, `replyMaxUsd`, `warnAt`, and `perUser` (Slack ID → own `dailyUsd` / `monthlyUsd`, optionally `until` a day). See *Budgets*. |
 | `usage.billing` | `apiKeyIds`: the Anthropic API key IDs only Fenix uses, and `refreshHours` (default 6). With `ANTHROPIC_ADMIN_KEY` set, budgets follow the bill. See *Billed costs*. |
+| `translate` | German translation for owners: `userIds` (owners to translate for; others are ignored; default none, so off), `defaultLanguage` (`en` or `pt-BR`, default `en`) and `batchSeconds` (messages arriving this soon after the first are translated in one reply, default 15). See *Translations*. |
 | `timeZone` | IANA time zone for times shown in Slack, matching the alerts (default `UTC`). |
 | `contextFile` | Markdown appended to the system prompt (default `prompts/context.local.md`). |
 | `dataDir` | Directory for persisted state: feedback and the failure log (default `data`). |
@@ -631,10 +653,11 @@ WantedBy=multi-user.target
 ├── integrations/                # TeamCity, YouTrack, GitLab API clients and TeamCity test history
 ├── agent/
 │   ├── fenix.js                 # Agent runner, system prompt, Slack-bound tools
+│   ├── translate.js             # German translation with one Claude Haiku call
 │   └── tools/                   # TeamCity, flaky tracker, YouTrack, GitLab, Grafana, usage, Slack send
 ├── listeners/
-│   ├── events/                  # DMs, mentions, @Fenix delete, TeamCity failure analysis
-│   ├── actions/                 # Feedback and issue buttons
+│   ├── events/                  # DMs, mentions, @Fenix delete, TeamCity failure analysis, translations
+│   ├── actions/                 # Feedback, approval and translation buttons
 │   ├── shortcuts/               # Create YouTrack Ticket
 │   └── views/                   # App Home and modals
 ├── thread-context/              # Thread → agent session store

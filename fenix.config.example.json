@@ -36,6 +36,11 @@
     "replyMode": "dm",
     "ignoreHosts": ["test"]
   },
+  "translate": {
+    "userIds": ["U0123456789"],
+    "defaultLanguage": "en",
+    "batchSeconds": 15
+  },
   "timeZone": "Europe/Berlin",
   "mcp": {
     "enabled": false,

@@ -4,6 +4,7 @@ import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
 import { handleLimitCommand, parseLimitCommand } from './budget-limit-command.js';
 import { handleDeleteCommand, isDeleteCommand } from './delete-thread.js';
+import { parseTranslateCommand, runTranslateCommand } from './translate-command.js';
 import { handleReportCommand, parseReportCommand } from './usage-report-command.js';
 
 /**
@@ -43,6 +44,19 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     if (limitCommand && isOwner(userId)) {
       const actor = await resolveUserName(client, userId);
       await handleLimitCommand({ client, channel: channelId, threadTs, command: limitCommand, actor });
+      return;
+    }
+
+    // `@Fenix translate [pt|en|on|off]` in a thread: translation settings for that thread only, changed in code
+    // (no AI tokens). Owner-only; the answer is shown to them alone
+    const translateCommand = parseTranslateCommand(cleanedText);
+    if (translateCommand && isOwner(userId)) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        thread_ts: threadTs,
+        text: runTranslateCommand(userId, translateCommand, { channel: channelId, threadTs }),
+      });
       return;
     }
 

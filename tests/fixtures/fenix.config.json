@@ -19,6 +19,10 @@
   },
   "contextFile": "tests/fixtures/no-context.md",
   "dataDir": "tests/.data",
+  "translate": {
+    "userIds": ["U0OWNER", "U0ALLOWED"],
+    "batchSeconds": 0.05
+  },
   "grafana": {
     "url": "https://grafana.example.com",
     "botId": "B0GRAFANA",

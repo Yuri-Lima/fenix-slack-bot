@@ -4,6 +4,7 @@ import { GENERIC_ERROR_MESSAGE, gateRequest, isAllowed, isOwner } from '../../ut
 import { resolveUserName } from '../../utils/slack.js';
 import { replyWithAgent } from '../reply-with-agent.js';
 import { handleLimitCommand, parseLimitCommand } from './budget-limit-command.js';
+import { parseTranslateCommand, runTranslateCommand } from './translate-command.js';
 import { handleReportCommand, parseReportCommand } from './usage-report-command.js';
 
 /**
@@ -89,6 +90,13 @@ export async function handleMessage({ client, context, event, logger, say, saySt
   if (limitCommand && isOwner(userId)) {
     const actor = await resolveUserName(client, userId);
     await handleLimitCommand({ client, channel: event.channel, threadTs, command: limitCommand, actor });
+    return;
+  }
+
+  // `translate [pt|en|on|off]`: translation settings, changed in code (no AI tokens). Owner-only
+  const translateCommand = parseTranslateCommand(text);
+  if (translateCommand && isOwner(userId)) {
+    await say({ text: runTranslateCommand(userId, translateCommand, null), thread_ts: threadTs });
     return;
   }
 

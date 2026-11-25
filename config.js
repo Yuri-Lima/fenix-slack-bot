@@ -31,6 +31,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  *   Claude app connectors when publicUrl is set (only redirect URIs listed in oauthRedirectUris may register).
  * @property {{ retentionMonths: number, budgets: UsageBudgets, billing: UsageBilling }} usage - Agent usage log: monthly
  *   files kept for this many months, the spending limits checked before each agent reply, and the bill they follow
+ * @property {TranslateConfig} translate - German messages translated for owners who do not read German
  * @property {string} timeZone - IANA time zone for times shown in Slack (alerts use it too)
  * @property {string} dataDir - Directory for persisted state (feedback, failure log), relative to the project root
  */
@@ -55,6 +56,16 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @typedef {Object} UsageBilling
  * @property {string[]} apiKeyIds - IDs ("apikey_...") of the Anthropic API keys only Fenix uses
  * @property {number} refreshHours - How often the bill is fetched
+ */
+
+/**
+ * Translation of German messages for owners who do not read German (listeners/events/translate-watch.js). In channels
+ * Fenix is in, German messages in threads such a person wrote in or was mentioned in, and top-level messages that
+ * mention them, are translated in the thread with a mention. Off while userIds is empty.
+ * @typedef {Object} TranslateConfig
+ * @property {string[]} userIds - Owners (Slack user IDs) to translate for; IDs that are not owners are ignored
+ * @property {'en' | 'pt-BR'} defaultLanguage - Language a person gets until they choose another
+ * @property {number} batchSeconds - Messages arriving this soon after the first one are translated in one reply
  */
 
 /** @type {FenixConfig} */
@@ -97,6 +108,7 @@ const DEFAULTS = {
     // Origins whose Client ID Metadata Documents may be fetched (Claude's published client identities)
     cimdOrigins: ['https://claude.ai', 'https://claude.com'],
   },
+  translate: { userIds: [], defaultLanguage: 'en', batchSeconds: 15 },
   timeZone: 'UTC',
 };
 
@@ -123,6 +135,7 @@ function loadConfig() {
       billing: { ...DEFAULTS.usage.billing, ...file.usage?.billing },
     },
     mcp: { ...DEFAULTS.mcp, ...file.mcp },
+    translate: { ...DEFAULTS.translate, ...file.translate },
   };
 }
 
