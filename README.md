@@ -228,6 +228,13 @@ stamped with its send time so "yesterday" resolves):
   ask which one. Up to the newest 500 lines are grouped (repeats counted, with first and last time) and passwords,
   tokens and credentials in URLs are masked. Filters: `service`, `search` text, `problems_only`.
 - **`host_health`** adds the metrics and a verdict when the question is about the server being down or slow.
+  Where the Postgres exporter runs, it adds the database too: connections at the peak against the usable limit
+  (`max_connections` less the reserved ones), how many sit idle in a transaction, the oldest open transaction,
+  deadlocks, ACCESS EXCLUSIVE locks, cache hit rate, database sizes with their growth over 24 hours, and the table
+  with the most dead rows. A verdict is added only when something crosses a threshold: connections at 80% of the
+  limit (90% needs action), a transaction open for 5 minutes (30 needs action), new deadlocks, a table whose dead
+  rows are 100,000 and a fifth of its rows, a replica 60 s behind, or a database the exporter cannot reach. A server
+  whose exporter does not answer says so in one line; one without the exporter has no Postgres part.
 
 Files attached to a DM or a mention are read with the question, up to 4 per message, downloaded with the
 `files:read` scope and type checked from their bytes: screenshots (PNG, JPEG, GIF, WebP, up to 5 MB), PDFs (up to
@@ -555,6 +562,7 @@ cp fenix.config.example.json fenix.config.json
 | `grafana.prometheusUid` / `grafana.lokiUid` | Data source UIDs for metrics and logs. |
 | `grafana.replyMode` | `dm` (default) sends analyses to `adminDmChannel` as a preview, `thread` replies under the alert, `off` disables it. |
 | `grafana.ignoreHosts` | Parts of server names Fenix never analyses, case-insensitive (e.g. `["test"]`): their alerts get no reply and `host_logs` / `host_health` decline them. Default none. Owners can add more by asking (see *Excluding servers*). |
+| `grafana.postgresJob` | Prometheus job of postgres_exporter (default `postgres-exporter`), used to tell a server whose exporter is down from one without it. |
 | `mcp.enabled` / `mcp.host` / `mcp.port` / `mcp.path` | MCP endpoint for Claude Code (default off, `127.0.0.1:8787/mcp`). |
 | `mcp.publicUrl` / `mcp.oauthRedirectUris` / `mcp.cimdOrigins` | Public HTTPS origin of the endpoint, which turns on OAuth sign-in for Claude app connectors; the callback URLs clients may register; and the origins whose client metadata documents may be fetched (defaults: Claude's). |
 | `mcp.maxUploadMb` / `mcp.maxUploadTotalMb` | Largest file an MCP client may upload for `slack_send_message` (default 200 MB), and the total held on disk at once (default 1024 MB). |

@@ -21,6 +21,7 @@ import {
   VERDICT_STATUS,
 } from '../../integrations/host-health.js';
 import { formatHostLogs, MAX_LOG_MINUTES, readHostLogs, resolveLogHost } from '../../integrations/host-logs.js';
+import { collectPostgresEvidence, postgresLine, postgresVerdicts } from '../../integrations/postgres-health.js';
 import { textResult } from '../../utils/helpers.js';
 import { addedIgnoreParts, addIgnorePart, removeIgnorePart } from '../../utils/ignore-hosts-store.js';
 
@@ -58,7 +59,8 @@ const plain = (/** @type {string} */ s) => s.replace(/:[a-z_]+: /g, '').replace(
 export const hostHealthTool = tool(
   'host_health',
   'Health of one server from Grafana metrics and logs, now or at a past moment: reachability, CPU and load, ' +
-    'memory and swap, disk, Phoenix health checks, and error patterns, with a plain-language verdict. ' +
+    'memory and swap, disk, Phoenix health checks, Postgres (connections, long transactions, deadlocks, vacuum, ' +
+    'database size; where the Postgres exporter runs), and error patterns, with a plain-language verdict. ' +
     'Use for "how is <server> doing?", "was <server> slow yesterday at 10:00?", or a server named in an alert.',
   {
     host: z.string().describe("Server name as it appears in alerts and Grafana, e.g. 'web-01'."),
@@ -71,7 +73,10 @@ export const hostHealthTool = tool(
     if ('error' in until) return textResult(until.error, true);
     try {
       const start = until.sec - minutes * 60;
-      const evidence = await collectHostEvidence(host, { start, end: until.sec });
+      const [evidence, pg] = await Promise.all([
+        collectHostEvidence(host, { start, end: until.sec }),
+        collectPostgresEvidence(host, { start, end: until.sec }).catch(() => null),
+      ]);
       if (evidence.reachability.nodeLastSeen === null && evidence.cpus === null) {
         const lastSeen = await lastSeenWithin(host, LOOKBACK_DAYS);
         return lastSeen
@@ -86,6 +91,7 @@ export const hostHealthTool = tool(
         ...new Map(
           notableKinds(evidence)
             .map((k) => diagnose(k, evidence))
+            .concat(pg ? postgresVerdicts(host, pg, until.sec) : [])
             .map((v) => [v.title, v]),
         ).values(),
       ].sort((a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status));
@@ -99,6 +105,7 @@ export const hostHealthTool = tool(
       }
       if (verdicts.length === 0) lines.push('- Nothing unusual.');
       lines.push(...evidenceFields(evidence, 'other').map((f) => plain(f).replace('\n', ': ')));
+      if (pg) lines.push(postgresLine(pg));
       for (const t of evidence.logs?.topErrors || [])
         lines.push(`Error ${t.count}× (${t.service}): ${clip(t.sample, MAX_ERROR_CHARS)}`);
       return textResult(lines.join('\n'));

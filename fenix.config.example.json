@@ -34,7 +34,8 @@
     "prometheusUid": "prometheus",
     "lokiUid": "loki",
     "replyMode": "dm",
-    "ignoreHosts": ["test"]
+    "ignoreHosts": ["test"],
+    "postgresJob": "postgres-exporter"
   },
   "translate": {
     "userIds": ["U0123456789"],

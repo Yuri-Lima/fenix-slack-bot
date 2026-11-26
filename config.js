@@ -22,9 +22,10 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
  * @property {{ url: string | null, botId: string | null, keyConfigs: BuildConfigHint[] }} teamcity
  * @property {{ url: string | null, project: string | null, defaultBranch: string }} gitlab
  * @property {{ url: string | null, project: string }} youtrack
- * @property {{ url: string | null, botId: string | null, prometheusUid: string | null, lokiUid: string | null, replyMode: 'dm' | 'thread' | 'off', ignoreHosts: string[] }} grafana
+ * @property {{ url: string | null, botId: string | null, prometheusUid: string | null, lokiUid: string | null, replyMode: 'dm' | 'thread' | 'off', ignoreHosts: string[], postgresJob: string }} grafana
  *   Grafana alert analysis. replyMode 'dm' sends analyses to adminDmChannel (preview), 'thread' replies under the alert.
  *   ignoreHosts: name parts (case-insensitive) of servers never analysed, e.g. ["test"].
+ *   postgresJob: Prometheus job of postgres_exporter, to tell a server without it from one whose exporter is down.
  * @property {string} contextFile - Markdown appended to the system prompt (team-specific knowledge)
  * @property {{ enabled: boolean, host: string, port: number, path: string, publicUrl: string | null, oauthRedirectUris: string[], cimdOrigins: string[], maxUploadMb: number, maxUploadTotalMb: number }} mcp
  *   MCP server (read-only tools). Static bearer FENIX_MCP_TOKEN for Claude Code; OAuth with Slack approval for
@@ -79,7 +80,15 @@ const DEFAULTS = {
   teamcity: { url: null, botId: null, keyConfigs: [] },
   gitlab: { url: null, project: null, defaultBranch: 'main' },
   youtrack: { url: null, project: 'DEV' },
-  grafana: { url: null, botId: null, prometheusUid: null, lokiUid: null, replyMode: 'dm', ignoreHosts: [] },
+  grafana: {
+    url: null,
+    botId: null,
+    prometheusUid: null,
+    lokiUid: null,
+    replyMode: 'dm',
+    ignoreHosts: [],
+    postgresJob: 'postgres-exporter',
+  },
   contextFile: 'prompts/context.local.md',
   dataDir: 'data',
   usage: {
